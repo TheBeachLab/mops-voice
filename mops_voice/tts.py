@@ -46,6 +46,11 @@ class Synthesizer:
         # Pre-load the model (downloads once, then cached)
         self._model = F5TTS.from_pretrained("lucasnewman/f5-tts-mlx")
 
+        # Pre-compute mel spectrogram of reference audio (cached for all calls)
+        self._ref_mel = self._model._mel_spec(self._ref_audio)
+        mx.eval(self._ref_mel)
+        self._ref_mel_len = self._ref_mel.shape[0]
+
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         """Synthesize text to audio. Returns (audio_array, sample_rate)."""
         mx = self._mx
@@ -53,8 +58,9 @@ class Synthesizer:
 
         generation_text = convert_char_to_pinyin([self.ref_text + " " + text])
 
+        # Pass pre-computed mel (3D) — skips mel conversion in sample()
         wave, _ = self._model.sample(
-            mx.expand_dims(self._ref_audio, axis=0),
+            mx.expand_dims(self._ref_mel, axis=0),
             text=generation_text,
             steps=8,
             method="rk4",
@@ -63,8 +69,8 @@ class Synthesizer:
             sway_sampling_coef=-1.0,
         )
 
-        # Trim the reference audio portion
-        wave = wave[self._ref_audio.shape[0]:]
+        # Trim the reference mel portion
+        wave = wave[self._ref_mel_len:]
         # Force MLX computation to complete (mx.eval is MLX's
         # graph evaluation, not Python's eval builtin)
         mx.eval(wave)
