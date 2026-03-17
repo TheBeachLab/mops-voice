@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import os
 import threading
 import time
 from pathlib import Path
@@ -123,14 +124,32 @@ async def run(argv: list[str] | None = None):
 
     # --- Keyboard listener ---
     from pynput import keyboard
+    import subprocess as _sp
 
     recording = False
     stop_event = threading.Event()
     space_held = False
 
+    # Get our terminal's PID to check focus
+    _our_pid = str(os.getpid())
+
+    def _terminal_is_focused() -> bool:
+        """Check if our terminal app is the frontmost window on macOS."""
+        try:
+            result = _sp.run(
+                ["osascript", "-e", 'tell application "System Events" to get name of first process whose frontmost is true'],
+                capture_output=True, text=True, timeout=1
+            )
+            app = result.stdout.strip().lower()
+            return app in ("terminal", "iterm2", "iterm", "warp", "alacritty", "kitty", "ghostty")
+        except Exception:
+            return True  # if check fails, allow recording
+
     def on_press(key):
         nonlocal recording, space_held
         if key == keyboard.Key.space and not space_held:
+            if not _terminal_is_focused():
+                return
             space_held = True
             if not recording:
                 recording = True
