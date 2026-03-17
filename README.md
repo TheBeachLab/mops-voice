@@ -5,7 +5,7 @@ Voice-controlled CLI assistant for digital fabrication. Talk to MOPS, control yo
 ## Pipeline
 
 ```
-🎤 Mic → whisper.cpp → Claude API + MOPS MCP tools → F5-TTS → 🔊 Speaker
+🎤 Mic → whisper.cpp → Claude Code CLI + MOPS MCP tools → F5-TTS → 🔊 Speaker
 ```
 
 ## Setup
@@ -19,8 +19,8 @@ mkdir -p ~/.mops-voice
 # Place reference audio: ~/.mops-voice/tars_reference.wav (24kHz mono WAV, 5-15s)
 # Place transcript:      ~/.mops-voice/tars_reference.txt (exact text from audio)
 
-# API key
-export ANTHROPIC_API_KEY="your-key"
+# Requires Claude Code CLI (included with Max/Team plan)
+# Install: https://docs.anthropic.com/en/docs/claude-code
 ```
 
 ## Usage
@@ -51,5 +51,6 @@ Settings persist in `~/.mops-voice/config.json`.
 ## Requirements
 
 - macOS with Apple Silicon (M1/M2/M3)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (Max or Team plan)
 - Node.js (for MOPS MCP server)
 - [MOPS](../mops) MCP server in sibling directory
