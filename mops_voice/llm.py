@@ -134,7 +134,7 @@ class MopsLLM:
             "claude",
             "-p", full_prompt,
             "--system-prompt", system_prompt,
-            "--output-format", "stream-json",
+            "--output-format", "json",
             "--no-session-persistence",
             "--model", self.config.get("claude_model", "sonnet"),
         ]
@@ -149,51 +149,22 @@ class MopsLLM:
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            response_text = ""
+            stdout, stderr = await proc.communicate()
+            output = stdout.decode("utf-8").strip()
 
-            # Parse stream-json output for tool calls and text
-            async for line in proc.stdout:
-                line = line.decode("utf-8").strip()
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            if proc.returncode != 0 or not output:
+                return "I'm having trouble thinking right now, Fran. Try again."
 
-                msg_type = chunk.get("type")
-
-                if msg_type == "assistant" and "message" in chunk:
-                    message = chunk["message"]
-                    if isinstance(message, str):
-                        response_text = message
-                    elif isinstance(message, dict):
-                        content = message.get("content", "")
-                        if isinstance(content, str):
-                            response_text = content
-
-                elif msg_type == "result":
-                    result_text = chunk.get("result", "")
-                    if result_text:
-                        response_text = result_text
-
-                elif msg_type == "tool_use":
-                    tool_name = chunk.get("tool", chunk.get("name", "unknown"))
-                    if on_tool_call:
-                        on_tool_call(tool_name, "executing...")
-
-                elif msg_type == "tool_result":
-                    tool_name = chunk.get("tool", chunk.get("name", "unknown"))
-                    result = chunk.get("result", "")
-                    if on_tool_call:
-                        summary = str(result)[:80]
-                        on_tool_call(tool_name, summary)
-
-            await proc.wait()
+            # Parse JSON result
+            try:
+                result = json.loads(output)
+                response_text = result.get("result", "")
+            except json.JSONDecodeError:
+                # If not JSON, treat as plain text
+                response_text = output
 
             if not response_text:
-                if proc.returncode != 0:
-                    return "I'm having trouble thinking right now, Fran. Try again."
+                return "I'm having trouble thinking right now, Fran. Try again."
 
             # Handle personality updates in the response
             response_text = self._extract_personality_update(response_text)
