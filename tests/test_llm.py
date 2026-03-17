@@ -1,11 +1,14 @@
 import copy
+import json
 
 import pytest
 
 from mops_voice.llm import (
     build_system_prompt,
-    MAX_TOOL_ITERATIONS,
-    handle_personality_tool,
+    build_mcp_config,
+    _format_history,
+    MAX_HISTORY_TURNS,
+    MopsLLM,
 )
 from mops_voice.config import DEFAULT_CONFIG
 
@@ -27,41 +30,52 @@ def test_build_system_prompt_updates_with_changed_dials():
     assert "humor=10%" in prompt
 
 
-def test_max_tool_iterations():
-    assert MAX_TOOL_ITERATIONS == 10
+def test_max_history_turns():
+    assert MAX_HISTORY_TURNS == 10
 
 
-def test_handle_personality_tool_adjust(tmp_path):
+def test_build_mcp_config():
+    config = build_mcp_config("/path/to/server.js", ["--headless"])
+    assert "mcpServers" in config
+    assert "mops" in config["mcpServers"]
+    assert config["mcpServers"]["mops"]["command"] == "node"
+    assert config["mcpServers"]["mops"]["args"] == ["/path/to/server.js", "--headless"]
+
+
+def test_format_history_empty():
+    assert _format_history([]) == ""
+
+
+def test_format_history_with_entries():
+    history = [
+        {"user": "hello", "assistant": "Hi Fran"},
+        {"user": "mill PCB", "assistant": "Loading program"},
+    ]
+    result = _format_history(history)
+    assert "User: hello" in result
+    assert "MOPS: Hi Fran" in result
+    assert "User: mill PCB" in result
+
+
+def test_check_cli():
+    # claude should be available on this machine
+    assert MopsLLM.check_cli() is True
+
+
+def test_extract_personality_update(tmp_path):
     config = copy.deepcopy(DEFAULT_CONFIG)
     config_path = tmp_path / "config.json"
-    result = handle_personality_tool(
-        "adjust_personality",
-        {"dial": "humor", "value": 90},
-        config,
-        config_path,
-    )
-    assert "90" in result
+    llm = MopsLLM(config, config_path)
+    text = "PERSONALITY_UPDATE:humor=90\nHumor 90, confirmed."
+    result = llm._extract_personality_update(text)
+    assert result == "Humor 90, confirmed."
     assert config["personality"]["humor"] == 90
 
 
-def test_handle_personality_tool_get():
+def test_extract_personality_update_no_directive():
     config = copy.deepcopy(DEFAULT_CONFIG)
-    result = handle_personality_tool(
-        "get_personality",
-        {},
-        config,
-        None,
-    )
-    assert "humor" in result
-    assert "75" in result
-
-
-def test_handle_personality_tool_invalid():
-    config = copy.deepcopy(DEFAULT_CONFIG)
-    result = handle_personality_tool(
-        "adjust_personality",
-        {"dial": "humor", "value": 200},
-        config,
-        None,
-    )
-    assert "range" in result.lower()
+    llm = MopsLLM(config, None)
+    text = "Just a normal response."
+    result = llm._extract_personality_update(text)
+    assert result == "Just a normal response."
+    assert config["personality"]["humor"] == 75  # unchanged

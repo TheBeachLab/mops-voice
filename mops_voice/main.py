@@ -52,10 +52,10 @@ async def run(argv: list[str] | None = None):
         console.print("[red]No microphone detected. Cannot start.[/red]")
         return
 
-    # Check API key
-    if not MopsLLM.check_api_key():
-        console.print("[red]ANTHROPIC_API_KEY not set.[/red]")
-        console.print("Export it: export ANTHROPIC_API_KEY='your-key'")
+    # Check claude CLI
+    if not MopsLLM.check_cli():
+        console.print("[red]Claude CLI not found.[/red]")
+        console.print("Install it: https://docs.anthropic.com/en/docs/claude-code")
         return
 
     console.print("[bold cyan]MOPS Voice Assistant[/bold cyan]")
@@ -95,7 +95,7 @@ async def run(argv: list[str] | None = None):
     # LLM + MCP
     llm = MopsLLM(config, config_path)
 
-    # Build MOPS server args
+    # Configure MOPS MCP server for claude CLI
     mcp_args = []
     if args.headed:
         pass  # user wants to see the browser; don't pass --headless
@@ -109,12 +109,12 @@ async def run(argv: list[str] | None = None):
     if not Path(server_path).is_absolute():
         server_path = str((Path(__file__).parent.parent / server_path).resolve())
 
-    console.print("🤖 Connecting to MOPS MCP server...", end=" ")
-    mcp_connected = await llm.connect_mcp(server_path, mcp_args)
-    if mcp_connected:
-        console.print(f"[green]OK ({len(llm.mcp_tools)} tools)[/green]")
+    console.print("🤖 Configuring MOPS MCP server...", end=" ")
+    if Path(server_path).exists():
+        llm.setup_mcp(server_path, mcp_args)
+        console.print("[green]OK[/green]")
     else:
-        console.print("[yellow]WARN: Could not connect[/yellow]")
+        console.print(f"[yellow]WARN: Server not found at {server_path}[/yellow]")
         console.print("[yellow]   Conversation-only mode (no machine control)[/yellow]")
 
     console.print()
@@ -235,5 +235,4 @@ async def run(argv: list[str] | None = None):
         console.print("\n[bold]Shutting down...[/bold]")
     finally:
         listener.stop()
-        await llm.disconnect_mcp()
         console.print("[bold cyan]MOPS out.[/bold cyan]")

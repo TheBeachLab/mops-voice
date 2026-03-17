@@ -1,19 +1,16 @@
-"""Claude API async client with MCP integration and tool loop."""
+"""LLM integration via Claude Code CLI with MCP support."""
 
+import asyncio
 import json
+import shutil
 from pathlib import Path
-
-from anthropic import AsyncAnthropic
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 from mops_voice.personality import (
     adjust_personality,
     get_personality,
-    personality_tool_schemas,
 )
 
-MAX_TOOL_ITERATIONS = 10
+MAX_HISTORY_TURNS = 10
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are {assistant_name}, a voice assistant for digital fabrication.
@@ -21,7 +18,8 @@ You address the user as {user_name}.
 Personality settings: humor={humor}%, sarcasm={sarcasm}%, honesty={honesty}%.
 Adjust your tone accordingly. Keep responses concise — they'll be spoken aloud.
 You control fabrication machines through MOPS tools.
-When a personality setting is changed, confirm it briefly in-character.
+When a personality setting is changed, respond with PERSONALITY_UPDATE:dial=value in your response \
+(e.g. PERSONALITY_UPDATE:humor=90) followed by your spoken confirmation.
 When asked about your settings, report them.\
 """
 
@@ -38,184 +36,177 @@ def build_system_prompt(config: dict) -> str:
     )
 
 
-def handle_personality_tool(
-    tool_name: str,
-    tool_input: dict,
-    config: dict,
-    config_path: Path | None,
-) -> str:
-    """Handle a personality tool call. Returns result string for Claude."""
-    if tool_name == "adjust_personality":
-        result = adjust_personality(
-            config, config_path, tool_input["dial"], tool_input["value"]
-        )
-        if isinstance(result, str):
-            return result  # error message
-        return json.dumps(result)
-    elif tool_name == "get_personality":
-        return json.dumps(get_personality(config))
-    return f"Unknown personality tool: {tool_name}"
+def build_mcp_config(server_path: str, extra_args: list[str] | None = None) -> dict:
+    """Build MCP config JSON for the claude CLI."""
+    args = [server_path] + (extra_args or [])
+    return {
+        "mcpServers": {
+            "mops": {
+                "command": "node",
+                "args": args,
+            }
+        }
+    }
+
+
+def _format_history(history: list[dict]) -> str:
+    """Format conversation history as context for the prompt."""
+    if not history:
+        return ""
+    lines = ["Previous conversation:"]
+    for entry in history:
+        lines.append(f"User: {entry['user']}")
+        lines.append(f"MOPS: {entry['assistant']}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 class MopsLLM:
-    """Manages Claude API calls and MCP tool execution."""
+    """Manages Claude CLI calls with MCP tools."""
 
     def __init__(self, config: dict, config_path: Path):
         self.config = config
         self.config_path = config_path
-        self.client = AsyncAnthropic()  # reads ANTHROPIC_API_KEY from env
-        self.messages: list[dict] = []
-        self.max_messages = 100  # 50 pairs
-        self.mcp_session: ClientSession | None = None
-        self.mcp_tools: list[dict] = []
-        self._mcp_cm = None
-        self._mcp_session_cm = None
+        self.history: list[dict] = []
+        self.mcp_config_path: Path | None = None
+        self._mcp_available = False
 
     @staticmethod
-    def check_api_key() -> bool:
-        """Check if ANTHROPIC_API_KEY is set. Call at startup."""
-        import os
+    def check_cli() -> bool:
+        """Check if the claude CLI is available."""
+        return shutil.which("claude") is not None
 
-        return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    def setup_mcp(self, server_path: str, extra_args: list[str] | None = None) -> None:
+        """Write MCP config file for the claude CLI."""
+        from mops_voice.config import CONFIG_DIR
 
-    async def connect_mcp(
-        self, server_path: str, extra_args: list[str] | None = None
-    ) -> bool:
-        """Connect to the MOPS MCP server. Returns True on success."""
-        try:
-            args = [server_path] + (extra_args or [])
-            server_params = StdioServerParameters(
-                command="node",
-                args=args,
-            )
-            # Keep context managers alive for session lifetime
-            self._mcp_cm = stdio_client(server_params)
-            read, write = await self._mcp_cm.__aenter__()
-            self._mcp_session_cm = ClientSession(read, write)
-            self.mcp_session = await self._mcp_session_cm.__aenter__()
-            await self.mcp_session.initialize()
+        mcp_config = build_mcp_config(server_path, extra_args)
+        self.mcp_config_path = CONFIG_DIR / "mcp.json"
+        self.mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.mcp_config_path, "w") as f:
+            json.dump(mcp_config, f, indent=2)
+        self._mcp_available = True
 
-            # Discover tools
-            tools_result = await self.mcp_session.list_tools()
-            self.mcp_tools = [
-                {
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema,
-                }
-                for tool in tools_result.tools
-            ]
-            return True
-        except Exception:
-            self.mcp_session = None
-            self.mcp_tools = []
-            return False
+    def _prune_history(self):
+        """Keep last N turns of conversation history."""
+        if len(self.history) > MAX_HISTORY_TURNS:
+            self.history = self.history[-MAX_HISTORY_TURNS:]
 
-    async def disconnect_mcp(self):
-        """Shut down MCP session and subprocess."""
-        if self._mcp_session_cm:
-            try:
-                await self._mcp_session_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-        if self._mcp_cm:
-            try:
-                await self._mcp_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-
-    def _get_tools(self) -> list[dict]:
-        """Get all tools: MCP tools + personality tools."""
-        return self.mcp_tools + personality_tool_schemas()
-
-    def _prune_messages(self):
-        """Prune old messages, keeping last 20 (10 pairs)."""
-        if len(self.messages) > self.max_messages:
-            self.messages = self.messages[-20:]
+    def _extract_personality_update(self, text: str) -> str:
+        """Extract and apply PERSONALITY_UPDATE directives from response text."""
+        lines = text.split("\n")
+        clean_lines = []
+        for line in lines:
+            if "PERSONALITY_UPDATE:" in line:
+                try:
+                    directive = line.split("PERSONALITY_UPDATE:")[1].strip()
+                    dial, value = directive.split("=")
+                    dial = dial.strip()
+                    value = int(value.strip())
+                    adjust_personality(
+                        self.config, self.config_path, dial, value
+                    )
+                except (ValueError, IndexError):
+                    pass
+            else:
+                clean_lines.append(line)
+        return "\n".join(clean_lines).strip()
 
     async def chat(self, user_text: str, on_tool_call=None) -> str:
-        """Send user text, handle tool loop, return final text response.
+        """Send user text via claude CLI, return response text.
 
         on_tool_call: optional callback(tool_name, result_summary) for verbose output.
+        Uses asyncio.create_subprocess_exec for safe argument passing (no shell).
         """
-        self.messages.append({"role": "user", "content": user_text})
-        self._prune_messages()
+        self._prune_history()
 
-        tools = self._get_tools()
+        # Build the prompt with conversation history
+        history_context = _format_history(self.history)
+        if history_context:
+            full_prompt = f"{history_context}\nUser: {user_text}"
+        else:
+            full_prompt = user_text
 
-        for _iteration in range(MAX_TOOL_ITERATIONS):
-            try:
-                response = await self.client.messages.create(
-                    model=self.config["claude_model"],
-                    max_tokens=1024,
-                    system=build_system_prompt(self.config),
-                    messages=self.messages,
-                    tools=tools if tools else None,
-                )
-            except Exception:
-                # API error, rate limit, or network issue
-                return "I'm having trouble reaching my brain, Fran. Try again."
+        system_prompt = build_system_prompt(self.config)
 
-            # Collect text and tool_use blocks
-            text_parts = []
-            tool_uses = []
-            for block in response.content:
-                if block.type == "text":
-                    text_parts.append(block.text)
-                elif block.type == "tool_use":
-                    tool_uses.append(block)
+        # Build claude CLI command as a list (no shell interpolation)
+        cmd = [
+            "claude",
+            "-p", full_prompt,
+            "--system-prompt", system_prompt,
+            "--output-format", "stream-json",
+            "--no-session-persistence",
+            "--model", self.config.get("claude_model", "sonnet"),
+        ]
 
-            if not tool_uses:
-                # No more tool calls — we have the final response
-                final_text = " ".join(text_parts).strip()
-                self.messages.append(
-                    {"role": "assistant", "content": response.content}
-                )
-                return final_text
+        if self._mcp_available and self.mcp_config_path:
+            cmd.extend(["--mcp-config", str(self.mcp_config_path)])
 
-            # Process tool calls
-            self.messages.append({"role": "assistant", "content": response.content})
-            tool_results = []
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
-            for tool_use in tool_uses:
-                tool_name = tool_use.name
-                tool_input = tool_use.input
+            response_text = ""
 
-                # Check if it's a personality tool
-                if tool_name in ("adjust_personality", "get_personality"):
-                    result = handle_personality_tool(
-                        tool_name, tool_input, self.config, self.config_path
-                    )
-                elif self.mcp_session:
-                    # Call MCP tool
-                    try:
-                        mcp_result = await self.mcp_session.call_tool(
-                            tool_name, tool_input
-                        )
-                        result = (
-                            mcp_result.content[0].text
-                            if mcp_result.content
-                            else "OK"
-                        )
-                    except Exception as e:
-                        result = f"Tool error: {e}"
-                else:
-                    result = "Tool unavailable — MCP server not connected."
+            # Parse stream-json output for tool calls and text
+            async for line in proc.stdout:
+                line = line.decode("utf-8").strip()
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-                if on_tool_call:
-                    # Summarize result for verbose output
-                    summary = result[:80] + "..." if len(result) > 80 else result
-                    on_tool_call(tool_name, summary)
+                msg_type = chunk.get("type")
 
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use.id,
-                        "content": result,
-                    }
-                )
+                if msg_type == "assistant" and "message" in chunk:
+                    message = chunk["message"]
+                    if isinstance(message, str):
+                        response_text = message
+                    elif isinstance(message, dict):
+                        content = message.get("content", "")
+                        if isinstance(content, str):
+                            response_text = content
 
-            self.messages.append({"role": "user", "content": tool_results})
+                elif msg_type == "result":
+                    result_text = chunk.get("result", "")
+                    if result_text:
+                        response_text = result_text
 
-        # Exceeded max iterations
-        return "I got a bit carried away with the tools there, Fran. Let me try again."
+                elif msg_type == "tool_use":
+                    tool_name = chunk.get("tool", chunk.get("name", "unknown"))
+                    if on_tool_call:
+                        on_tool_call(tool_name, "executing...")
+
+                elif msg_type == "tool_result":
+                    tool_name = chunk.get("tool", chunk.get("name", "unknown"))
+                    result = chunk.get("result", "")
+                    if on_tool_call:
+                        summary = str(result)[:80]
+                        on_tool_call(tool_name, summary)
+
+            await proc.wait()
+
+            if not response_text:
+                if proc.returncode != 0:
+                    return "I'm having trouble thinking right now, Fran. Try again."
+
+            # Handle personality updates in the response
+            response_text = self._extract_personality_update(response_text)
+
+            # Update conversation history
+            self.history.append({
+                "user": user_text,
+                "assistant": response_text,
+            })
+
+            return response_text
+
+        except FileNotFoundError:
+            return "Claude CLI not found. Make sure 'claude' is in your PATH."
+        except Exception:
+            return "I'm having trouble thinking right now, Fran. Try again."
