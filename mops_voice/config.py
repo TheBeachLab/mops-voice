@@ -16,7 +16,7 @@ DEFAULT_CONFIG = {
     },
     "mops_server_path": "../mops/src/server.js",
     "whisper_model": "base.en",
-    "claude_model": "claude-sonnet-4-20250514",
+    "claude_model": "haiku",
 }
 
 

@@ -225,7 +225,7 @@ async def run(argv: list[str] | None = None):
             console.print(f"🤖 Calling Claude ({config['claude_model'].split('-')[1]})...")
 
             # Get acknowledgment, synthesize and play it
-            ack_text = await llm.acknowledge(text)
+            ack_text = llm.acknowledge()
             console.print(f"🤖 Ack: [dim]{ack_text}[/dim]")
 
             if synthesizer:
