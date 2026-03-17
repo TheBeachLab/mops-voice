@@ -1,54 +1,72 @@
 """Text-to-speech via F5-TTS with MLX acceleration and voice cloning."""
 
-import tempfile
-import os
 from pathlib import Path
 
 import numpy as np
-import soundfile as sf
+
+SAMPLE_RATE = 24000
+TARGET_RMS = 0.1
 
 
 class Synthesizer:
-    """F5-TTS wrapper. Load once, synthesize many."""
-
-    SAMPLE_RATE = 24000  # F5-TTS default output rate
+    """F5-TTS wrapper. Pre-loads model once, synthesizes many."""
 
     def __init__(self, ref_audio_path: Path, ref_text_path: Path):
-        from f5_tts_mlx.generate import generate
+        import mlx.core as mx
+        import soundfile as sf
+        from f5_tts_mlx import F5TTS
 
-        self._generate = generate
-        self.ref_audio_path = str(ref_audio_path)
+        self._mx = mx
+        self._sf = sf
 
-        if not Path(self.ref_audio_path).exists():
+        if not ref_audio_path.exists():
             raise FileNotFoundError(
                 f"Reference audio not found: {ref_audio_path}\n"
                 "Place a 5-15s WAV clip (24kHz mono 16-bit) of the target voice there."
             )
-
         if not ref_text_path.exists():
             raise FileNotFoundError(
                 f"Reference transcript not found: {ref_text_path}\n"
                 "Create it with the exact text spoken in the reference audio."
             )
+
         self.ref_text = ref_text_path.read_text().strip()
 
-    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
-        """Synthesize text to audio. Returns (audio_array, sample_rate).
+        # Load reference audio
+        audio, sr = sf.read(str(ref_audio_path))
+        if sr != SAMPLE_RATE:
+            raise ValueError(f"Reference audio must be {SAMPLE_RATE}Hz, got {sr}Hz")
+        self._ref_audio = mx.array(audio)
 
-        f5_tts_mlx.generate() writes to a file (side-effect only).
-        We write to a temp file, then read it back as a numpy array.
-        """
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            tmp_path = f.name
-        try:
-            self._generate(
-                generation_text=text,
-                ref_audio_path=self.ref_audio_path,
-                ref_audio_text=self.ref_text,
-                output_path=tmp_path,
-            )
-            audio_data, sample_rate = sf.read(tmp_path, dtype="float32")
-            return audio_data, sample_rate
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+        # Normalize RMS
+        rms = mx.sqrt(mx.mean(mx.square(self._ref_audio)))
+        if rms < TARGET_RMS:
+            self._ref_audio = self._ref_audio * TARGET_RMS / rms
+
+        # Pre-load the model (downloads once, then cached)
+        self._model = F5TTS.from_pretrained("lucasnewman/f5-tts-mlx")
+
+    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+        """Synthesize text to audio. Returns (audio_array, sample_rate)."""
+        mx = self._mx
+        from f5_tts_mlx.utils import convert_char_to_pinyin
+
+        generation_text = convert_char_to_pinyin([self.ref_text + " " + text])
+
+        wave, _ = self._model.sample(
+            mx.expand_dims(self._ref_audio, axis=0),
+            text=generation_text,
+            steps=8,
+            method="rk4",
+            speed=1.0,
+            cfg_strength=2.0,
+            sway_sampling_coef=-1.0,
+        )
+
+        # Trim the reference audio portion
+        wave = wave[self._ref_audio.shape[0]:]
+        # Force MLX computation to complete (mx.eval is MLX's
+        # graph evaluation, not Python's eval builtin)
+        mx.eval(wave)
+
+        return np.array(wave), SAMPLE_RATE
