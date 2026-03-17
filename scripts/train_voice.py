@@ -77,6 +77,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--save-every", type=int, default=1000, help="Save checkpoint every N steps")
     parser.add_argument("--sample-every", type=int, default=500, help="Generate sample every N steps")
+    parser.add_argument("--resume", type=int, default=None, help="Resume from checkpoint step (e.g. --resume 1000)")
     parser.add_argument("--wandb", action="store_true", help="Log to Weights & Biases")
     args = parser.parse_args()
 
@@ -101,7 +102,10 @@ def main():
     ref_audio = str(data_dir / "segment_01.wav")
     ref_text = (data_dir / "segment_01.normalized.txt").read_text().strip()
 
-    print(f"\nTraining for {args.steps} steps (lr={args.lr})")
+    resume_step = args.resume
+    if resume_step:
+        print(f"\nResuming from checkpoint step {resume_step}")
+    print(f"Training for {args.steps} steps (lr={args.lr})")
     print(f"Saving every {args.save_every} steps, sampling every {args.sample_every} steps")
     print(f"Checkpoints saved to: results/")
     print()
@@ -115,6 +119,7 @@ def main():
         sample_reference_audio=ref_audio,
         sample_reference_text=ref_text,
         sample_generation_text="Hello Fran, I'm MOPS, your digital fabrication assistant.",
+        checkpoint=resume_step,
     )
 
     print("\nTraining complete! Checkpoints saved to results/")
