@@ -69,7 +69,7 @@ async def run(argv: list[str] | None = None):
     # --- Initialize components ---
 
     # Transcriber
-    console.print("Loading whisper model...", end=" ")
+    console.print("📝 Loading whisper model...", end=" ")
     try:
         transcriber = Transcriber(config["whisper_model"])
         console.print("[green]OK[/green]")
@@ -81,7 +81,7 @@ async def run(argv: list[str] | None = None):
     ref_audio = CONFIG_DIR / "tars_reference.wav"
     ref_text = CONFIG_DIR / "tars_reference.txt"
     synthesizer = None
-    console.print("Loading TTS model...", end=" ")
+    console.print("🔊 Loading TTS model...", end=" ")
     try:
         synthesizer = Synthesizer(ref_audio, ref_text)
         console.print("[green]OK[/green]")
@@ -98,7 +98,7 @@ async def run(argv: list[str] | None = None):
     # Build MOPS server args
     mcp_args = []
     if args.headed:
-        pass  # default is headed for MOPS server
+        pass  # user wants to see the browser; don't pass --headless
     else:
         mcp_args.append("--headless")
     if args.mods_url:
@@ -109,7 +109,7 @@ async def run(argv: list[str] | None = None):
     if not Path(server_path).is_absolute():
         server_path = str((Path(__file__).parent.parent / server_path).resolve())
 
-    console.print("Connecting to MOPS MCP server...", end=" ")
+    console.print("🤖 Connecting to MOPS MCP server...", end=" ")
     mcp_connected = await llm.connect_mcp(server_path, mcp_args)
     if mcp_connected:
         console.print(f"[green]OK ({len(llm.mcp_tools)} tools)[/green]")
@@ -157,7 +157,7 @@ async def run(argv: list[str] | None = None):
             while not recording:
                 await asyncio.sleep(0.05)
 
-            console.print("[bold red]Recording...[/bold red]", end=" ")
+            console.print("🎤 [bold red]Recording...[/bold red]", end=" ")
 
             # Record in thread
             audio_data = await loop.run_in_executor(
@@ -177,7 +177,7 @@ async def run(argv: list[str] | None = None):
                 console.print("[yellow]No audio captured[/yellow]")
                 continue
 
-            console.print("Transcribing...", end=" ")
+            console.print("📝 Transcribing...", end=" ")
             text = await loop.run_in_executor(
                 None, transcriber.transcribe, wav_bytes
             )
@@ -204,31 +204,31 @@ async def run(argv: list[str] | None = None):
 
             # Claude API with tool loop
             t0 = time.monotonic()
-            console.print(f"Calling Claude ({config['claude_model'].split('-')[1]})...")
+            console.print(f"🤖 Calling Claude ({config['claude_model'].split('-')[1]})...")
 
             def on_tool_call(name, summary):
-                console.print(f"  Tool call: {name} -> {summary}")
+                console.print(f"  🔧 Tool call: {name} → {summary}")
 
             response_text = await llm.chat(text, on_tool_call=on_tool_call)
-            console.print(f"Response: [green]{response_text}[/green]")
+            console.print(f"🤖 Response: [green]{response_text}[/green]")
 
             # TTS
             if synthesizer:
-                console.print("Synthesizing speech...", end=" ")
+                console.print("🔊 Synthesizing speech...", end=" ")
                 try:
                     audio, sr = await loop.run_in_executor(
                         None, synthesizer.synthesize, response_text
                     )
                     audio_duration = len(audio) / sr
                     console.print(f"[green]{audio_duration:.1f}s[/green]")
-                    console.print("Playing...", end=" ")
+                    console.print("🔊 Playing...", end=" ")
                     await loop.run_in_executor(None, play_audio, audio, sr)
                     console.print("[green]done[/green]")
                 except Exception as e:
                     console.print(f"[red]TTS error: {e}[/red]")
 
             elapsed = time.monotonic() - t0
-            console.print(f"Total: {elapsed:.1f}s")
+            console.print(f"⏱️  Total: {elapsed:.1f}s")
             console.print()
 
     except KeyboardInterrupt:
