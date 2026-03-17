@@ -58,7 +58,7 @@ class Synthesizer:
             text=generation_text,
             steps=8,
             method="rk4",
-            speed=1.0,
+            speed=1.2,
             cfg_strength=2.0,
             sway_sampling_coef=-1.0,
         )
