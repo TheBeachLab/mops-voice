@@ -166,6 +166,13 @@ async def run(argv: list[str] | None = None):
     listener.daemon = True
     listener.start()
 
+    # Suppress spacebar from reaching terminal (raw mode)
+    import sys
+    import tty
+    import termios
+    _old_term = termios.tcgetattr(sys.stdin)
+    tty.setcbreak(sys.stdin.fileno())
+
     # --- Main loop ---
     loop = asyncio.get_running_loop()
 
@@ -220,38 +227,17 @@ async def run(argv: list[str] | None = None):
                         pass
                 break
 
-            # Get quick acknowledgment and speak it while tools run
+            # Claude + tools
             t0 = time.monotonic()
             console.print(f"🤖 Calling Claude ({config['claude_model']})...")
 
-            # Get acknowledgment, synthesize and play it
-            ack_text = llm.acknowledge()
-            console.print(f"🤖 Ack: [dim]{ack_text}[/dim]")
-
-            if synthesizer:
-                try:
-                    ack_audio, ack_sr = await loop.run_in_executor(
-                        None, synthesizer.synthesize, ack_text
-                    )
-                    # Play acknowledgment while running the full request
-                    play_task = loop.run_in_executor(None, play_audio, ack_audio, ack_sr)
-                except Exception:
-                    play_task = None
-            else:
-                play_task = None
-
-            # Run full request with tools (in parallel with ack playback)
             def on_tool_call(name, summary):
                 console.print(f"  🔧 Tool call: {name} → {summary}")
 
             response_text = await llm.chat(text, on_tool_call=on_tool_call)
             console.print(f"🤖 Response: [green]{response_text}[/green]")
 
-            # Wait for ack playback to finish before speaking the response
-            if play_task:
-                await play_task
-
-            # TTS the full response
+            # TTS
             if synthesizer:
                 console.print("🔊 Synthesizing speech...", end=" ")
                 try:
@@ -273,5 +259,6 @@ async def run(argv: list[str] | None = None):
     except KeyboardInterrupt:
         console.print("\n[bold]Shutting down...[/bold]")
     finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
         listener.stop()
         console.print("[bold cyan]MOPS out.[/bold cyan]")
