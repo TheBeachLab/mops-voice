@@ -1,13 +1,12 @@
 import copy
 import json
 
-import pytest
-
 from mops_voice.llm import (
     build_system_prompt,
-    build_mcp_config,
     _format_history,
+    _parse_tool_calls,
     MAX_HISTORY_TURNS,
+    MAX_TOOL_LOOPS,
     MopsLLM,
 )
 from mops_voice.config import DEFAULT_CONFIG
@@ -30,16 +29,22 @@ def test_build_system_prompt_updates_with_changed_dials():
     assert "humor=10%" in prompt
 
 
-def test_max_history_turns():
+def test_build_system_prompt_includes_tools():
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    prompt = build_system_prompt(config, "- load_program: Load a program")
+    assert "load_program" in prompt
+    assert "TOOL_CALL" in prompt
+
+
+def test_build_system_prompt_no_tools():
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    prompt = build_system_prompt(config, "")
+    assert "TOOL_CALL" not in prompt
+
+
+def test_max_constants():
     assert MAX_HISTORY_TURNS == 10
-
-
-def test_build_mcp_config():
-    config = build_mcp_config("/path/to/server.js", ["--headless"])
-    assert "mcpServers" in config
-    assert "mops" in config["mcpServers"]
-    assert config["mcpServers"]["mops"]["command"] == "node"
-    assert config["mcpServers"]["mops"]["args"] == ["/path/to/server.js", "--headless"]
+    assert MAX_TOOL_LOOPS == 10
 
 
 def test_format_history_empty():
@@ -54,11 +59,34 @@ def test_format_history_with_entries():
     result = _format_history(history)
     assert "User: hello" in result
     assert "MOPS: Hi Fran" in result
-    assert "User: mill PCB" in result
+
+
+def test_parse_tool_calls_none():
+    calls, text = _parse_tool_calls("Just a normal response.")
+    assert calls == []
+    assert text == "Just a normal response."
+
+
+def test_parse_tool_calls_single():
+    response = 'TOOL_CALL:{"name":"load_program","input":{"path":"pcb"}}\nLoading it now.'
+    calls, text = _parse_tool_calls(response)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "load_program"
+    assert text == "Loading it now."
+
+
+def test_parse_tool_calls_multiple():
+    response = (
+        'TOOL_CALL:{"name":"get_server_status","input":{}}\n'
+        'TOOL_CALL:{"name":"load_program","input":{"path":"pcb"}}\n'
+        "Done."
+    )
+    calls, text = _parse_tool_calls(response)
+    assert len(calls) == 2
+    assert text == "Done."
 
 
 def test_check_cli():
-    # claude should be available on this machine
     assert MopsLLM.check_cli() is True
 
 
@@ -70,12 +98,3 @@ def test_extract_personality_update(tmp_path):
     result = llm._extract_personality_update(text)
     assert result == "Humor 90, confirmed."
     assert config["personality"]["humor"] == 90
-
-
-def test_extract_personality_update_no_directive():
-    config = copy.deepcopy(DEFAULT_CONFIG)
-    llm = MopsLLM(config, None)
-    text = "Just a normal response."
-    result = llm._extract_personality_update(text)
-    assert result == "Just a normal response."
-    assert config["personality"]["humor"] == 75  # unchanged

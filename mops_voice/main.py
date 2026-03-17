@@ -93,11 +93,9 @@ async def run(argv: list[str] | None = None):
         console.print(f"[yellow]WARN: TTS failed: {e}[/yellow]")
         console.print("[yellow]   TTS disabled -- text-only mode[/yellow]")
 
-    # LLM + MCP
+    # LLM + persistent MCP
     llm = MopsLLM(config, config_path)
 
-    # Configure MOPS MCP server for claude CLI
-    # Default to headed so user can see Mods CE; pass --headless to hide
     mcp_args = []
     if args.headless:
         mcp_args.append("--headless")
@@ -105,14 +103,17 @@ async def run(argv: list[str] | None = None):
         mcp_args.extend(["--mods-url", args.mods_url])
 
     server_path = config["mops_server_path"]
-    # Resolve relative path from mops-voice repo root
     if not Path(server_path).is_absolute():
         server_path = str((Path(__file__).parent.parent / server_path).resolve())
 
-    console.print("🤖 Configuring MOPS MCP server...", end=" ")
+    console.print("🤖 Connecting to MOPS MCP server...", end=" ")
     if Path(server_path).exists():
-        llm.setup_mcp(server_path, mcp_args)
-        console.print("[green]OK[/green]")
+        mcp_ok = await llm.connect_mcp(server_path, mcp_args)
+        if mcp_ok:
+            console.print(f"[green]OK ({len(llm._mcp_tools)} tools)[/green]")
+        else:
+            console.print("[yellow]WARN: Could not connect[/yellow]")
+            console.print("[yellow]   Conversation-only mode (no machine control)[/yellow]")
     else:
         console.print(f"[yellow]WARN: Server not found at {server_path}[/yellow]")
         console.print("[yellow]   Conversation-only mode (no machine control)[/yellow]")
@@ -261,4 +262,5 @@ async def run(argv: list[str] | None = None):
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
         listener.stop()
+        await llm.disconnect_mcp()
         console.print("[bold cyan]MOPS out.[/bold cyan]")
