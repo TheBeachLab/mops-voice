@@ -222,7 +222,7 @@ async def run(argv: list[str] | None = None):
 
             # Get quick acknowledgment and speak it while tools run
             t0 = time.monotonic()
-            console.print(f"🤖 Calling Claude ({config['claude_model'].split('-')[1]})...")
+            console.print(f"🤖 Calling Claude ({config['claude_model']})...")
 
             # Get acknowledgment, synthesize and play it
             ack_text = llm.acknowledge()
