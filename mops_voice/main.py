@@ -26,7 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--mods-url", type=str, default=None, help="Mods CE URL (forwarded to MOPS server)"
     )
     parser.add_argument(
-        "--headed", action="store_true", default=False, help="Show browser window (default: headless)"
+        "--headless", action="store_true", default=False, help="Hide browser window (default: visible)"
     )
     parser.add_argument(
         "--whisper-model", type=str, default=None, help="Whisper model name"
@@ -97,10 +97,9 @@ async def run(argv: list[str] | None = None):
     llm = MopsLLM(config, config_path)
 
     # Configure MOPS MCP server for claude CLI
+    # Default to headed so user can see Mods CE; pass --headless to hide
     mcp_args = []
-    if args.headed:
-        pass  # user wants to see the browser; don't pass --headless
-    else:
+    if args.headless:
         mcp_args.append("--headless")
     if args.mods_url:
         mcp_args.extend(["--mods-url", args.mods_url])
@@ -221,17 +220,38 @@ async def run(argv: list[str] | None = None):
                         pass
                 break
 
-            # Claude API with tool loop
+            # Get quick acknowledgment and speak it while tools run
             t0 = time.monotonic()
             console.print(f"🤖 Calling Claude ({config['claude_model'].split('-')[1]})...")
 
+            # Get acknowledgment, synthesize and play it
+            ack_text = await llm.acknowledge(text)
+            console.print(f"🤖 Ack: [dim]{ack_text}[/dim]")
+
+            if synthesizer:
+                try:
+                    ack_audio, ack_sr = await loop.run_in_executor(
+                        None, synthesizer.synthesize, ack_text
+                    )
+                    # Play acknowledgment while running the full request
+                    play_task = loop.run_in_executor(None, play_audio, ack_audio, ack_sr)
+                except Exception:
+                    play_task = None
+            else:
+                play_task = None
+
+            # Run full request with tools (in parallel with ack playback)
             def on_tool_call(name, summary):
                 console.print(f"  🔧 Tool call: {name} → {summary}")
 
             response_text = await llm.chat(text, on_tool_call=on_tool_call)
             console.print(f"🤖 Response: [green]{response_text}[/green]")
 
-            # TTS
+            # Wait for ack playback to finish before speaking the response
+            if play_task:
+                await play_task
+
+            # TTS the full response
             if synthesizer:
                 console.print("🔊 Synthesizing speech...", end=" ")
                 try:

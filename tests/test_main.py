@@ -5,14 +5,14 @@ from mops_voice.main import parse_args
 
 def test_parse_args_defaults():
     args = parse_args([])
-    assert args.headed is False
+    assert args.headless is False
     assert args.mods_url is None
     assert args.whisper_model is None
 
 
-def test_parse_args_headed():
-    args = parse_args(["--headed"])
-    assert args.headed is True
+def test_parse_args_headless():
+    args = parse_args(["--headless"])
+    assert args.headless is True
 
 
 def test_parse_args_mods_url():

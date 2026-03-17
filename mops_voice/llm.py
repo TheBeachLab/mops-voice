@@ -120,6 +120,37 @@ class MopsLLM:
                 clean_lines.append(line)
         return "\n".join(clean_lines).strip()
 
+    async def acknowledge(self, user_text: str) -> str:
+        """Quick acknowledgment without tools. For speaking before acting."""
+        system_prompt = build_system_prompt(self.config)
+        ack_prompt = (
+            f"The user said: \"{user_text}\". "
+            "Give a brief 3-5 word acknowledgment that you'll do it. "
+            "Just the acknowledgment, nothing else."
+        )
+        cmd = [
+            "claude",
+            "-p", ack_prompt,
+            "--system-prompt", system_prompt,
+            "--output-format", "json",
+            "--no-session-persistence",
+            "--model", self.config.get("claude_model", "sonnet"),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            output = stdout.decode("utf-8").strip()
+            if proc.returncode == 0 and output:
+                result = json.loads(output)
+                return self._extract_personality_update(result.get("result", "On it."))
+        except Exception:
+            pass
+        return "On it."
+
     async def chat(self, user_text: str, on_tool_call=None) -> str:
         """Send user text via claude CLI, return response text.
 
