@@ -78,20 +78,23 @@ async def run(argv: list[str] | None = None):
         console.print(f"[red]FAILED: {e}[/red]")
         return
 
-    # TTS
+    # TTS — try XTTS server first, fall back to F5-TTS with reference audio
     ref_audio = CONFIG_DIR / "tars_reference.wav"
     ref_text = CONFIG_DIR / "tars_reference.txt"
     synthesizer = None
-    console.print("🔊 Loading TTS model...", end=" ")
+    console.print("🔊 Loading TTS...", end=" ")
     try:
         synthesizer = Synthesizer(ref_audio, ref_text)
-        console.print("[green]OK[/green]")
+        if synthesizer._use_xtts:
+            console.print("[green]OK (XTTS server — TARS voice)[/green]")
+        else:
+            console.print("[green]OK (F5-TTS with reference audio)[/green]")
     except FileNotFoundError as e:
         console.print(f"[yellow]WARN: {e}[/yellow]")
-        console.print("[yellow]   TTS disabled -- text-only mode[/yellow]")
+        console.print("[yellow]   TTS disabled — text-only mode[/yellow]")
     except Exception as e:
         console.print(f"[yellow]WARN: TTS failed: {e}[/yellow]")
-        console.print("[yellow]   TTS disabled -- text-only mode[/yellow]")
+        console.print("[yellow]   TTS disabled — text-only mode[/yellow]")
 
     # LLM + persistent MCP
     llm = MopsLLM(config, config_path)
