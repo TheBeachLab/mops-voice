@@ -220,6 +220,7 @@ class MopsLLM:
             "--output-format", "json",
             "--no-session-persistence",
             "--model", self.config.get("claude_model", "sonnet"),
+            "--setting-sources", "",
         ]
 
         proc = await asyncio.create_subprocess_exec(
