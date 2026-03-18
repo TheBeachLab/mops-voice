@@ -70,11 +70,13 @@ def synthesize():
     if not text:
         return Response("No text provided", status=400)
 
-    # Synthesize speech (no reference audio needed - voice is baked in)
+    # Synthesize speech using the bundled reference audio
+    import os
+    ref_wav = os.path.join(MODEL_DIR, "reference.wav")
     outputs = model.synthesize(
         text,
         config=model.config,
-        speaker_wav=None,
+        speaker_wav=ref_wav,
         language="en",
     )
 
