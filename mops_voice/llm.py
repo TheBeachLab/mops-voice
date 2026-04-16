@@ -54,7 +54,7 @@ You control fabrication machines through MOPS tools.
 
 CUTTING WORKFLOW — follow these steps IN ORDER, never skip any:
 1. launch_browser (open mods if not already open)
-2. find_machine (find the right machine and matching program)
+2. find_machine — returns a JSON array of machines sorted by relevanceScore (highest first). Pick scored[0], then choose the entry from its matchingPrograms whose path most specifically matches the machine model (e.g. for "Roland GX-24", prefer a path containing "GX-24" over a generic "roland" path). Pass that exact path to load_program.
 3. load_program (load the cutting/milling program for that machine)
 4. load_file (load the user's file — REQUIRED before setting size)
 5. set_physical_size (set desired width, height, and unit — e.g. 10, 10, "cm". PNG only.)
@@ -68,15 +68,16 @@ IMPORTANT RULES:
 SENDING TO MACHINE (only when user says "cut"/"send"/"go"):
 1. get_program_state — find the on/off switch connected to WebUSB, the WebUSB module itself, and which module has the "calculate" button.
 2. Ensure the on/off switch is ON: set_parameter(module_name="on/off:MODULE_ID", parameter="on/off", value="true").
-3. trigger_action on the WebUSB module — click "Get Device". MOPS auto-selects via CDP. Do NOT tell the user to select anything.
-4. trigger_action — click "calculate" on the toolpath module (usually has "raster", "path", or "distance" in its name). This generates the toolpath and sends it to the WebUSB module.
-5. trigger_action on the WebUSB module — click "send" to start the machine.
+3. trigger_action on the WebUSB module — click "Get Device". MOPS auto-selects via CDP (first session) or silently reconnects via getDevices() (subsequent sessions). Do NOT tell the user to select anything.
+4. trigger_action — click "calculate" on the toolpath module (usually has "raster", "path", or "distance" in its name). This generates the toolpath and sends it to the WebUSB module. The WebUSB module's third button label will change from "waiting for file" to "send file".
+5. Call get_program_state again to confirm the button is now labeled "send file", then trigger_action on the WebUSB module — click "send file" to start the machine.
 
 Once the device is connected (step 3), it stays connected for the session. For subsequent sends, skip to step 3.
 
 CRITICAL — READ CAREFULLY:
 - On/off switches are CHECKBOXES, not buttons. Use set_parameter, NEVER trigger_action on an on/off module.
-- "calculate" generates the toolpath but does NOT start the machine. You MUST click "send" on the WebUSB module after calculate.
+- "calculate" generates the toolpath but does NOT start the machine. You MUST click "send file" on the WebUSB module after calculate.
+- The WebUSB send button is labeled "send file" (not "send") and only appears after calculate fires. Always re-check with get_program_state after calculate.
 - NEVER tell the user to manually select a device. MOPS handles it automatically via CDP.
 When a personality setting is changed, respond with PERSONALITY_UPDATE:dial=value on its own line \
 (e.g. PERSONALITY_UPDATE:humor=90) followed by a brief spoken confirmation.
