@@ -2,9 +2,17 @@
 
 import copy
 import json
+import platform
+import sys
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".mops-voice"
+
+# F5-TTS uses MLX, which only runs on Apple Silicon. Elsewhere, fall back
+# to the Voxtral API so first-run isn't a crash.
+_DEFAULT_TTS_ENGINE = (
+    "f5" if sys.platform == "darwin" and platform.machine() == "arm64" else "voxtral"
+)
 
 DEFAULT_CONFIG = {
     "assistant_name": "MOPS",
@@ -21,7 +29,7 @@ DEFAULT_CONFIG = {
     "anthropic": {
         "api_key": "",
     },
-    "tts_engine": "f5",
+    "tts_engine": _DEFAULT_TTS_ENGINE,
     "voxtral": {
         "api_key": "",
         "voice": "en_paul_confident",

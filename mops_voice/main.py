@@ -5,6 +5,7 @@ import asyncio
 import os
 import queue
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -206,7 +207,10 @@ async def run(argv: list[str] | None = None):
     _our_pid = str(os.getpid())
 
     def _terminal_is_focused() -> bool:
-        """Check if our terminal app is the frontmost window on macOS."""
+        """Check if our terminal app is the frontmost window. macOS-only;
+        elsewhere assume yes (the global keyboard listener still fires)."""
+        if sys.platform != "darwin":
+            return True
         try:
             result = _sp.run(
                 ["osascript", "-e", 'tell application "System Events" to get name of first process whose frontmost is true'],
