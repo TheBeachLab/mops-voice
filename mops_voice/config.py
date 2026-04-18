@@ -34,6 +34,10 @@ DEFAULT_CONFIG = {
         "api_key": "",
         "voice": "en_paul_confident",
     },
+    "image_roast": {
+        "probability": 0.3,
+        "max_dim": 512,
+    },
 }
 
 

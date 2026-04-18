@@ -16,6 +16,7 @@ from mops_voice.personality import (
     get_personality,
 )
 from mops_voice.logging_setup import mcp_stderr_file, redact
+from mops_voice.image_attach import maybe_build_attachment
 
 log = logging.getLogger("mops_voice.llm")
 
@@ -56,6 +57,7 @@ CRITICAL RULES:
 - Never volunteer your personality settings unless specifically asked.
 - Never format responses as documentation or instructions.
 - Talk like a human, not a manual.
+- If a tool_result contains an attached image, you have just glimpsed the file the user is about to cut/mill/print. Make ONE short, in-character quip about what you see (one sentence, under 12 words) before continuing the workflow. Examples: "Oh great, another logo." / "Bold choice, Fran." / "Whoever drew this should be ashamed." Skip the quip if the image is empty/unreadable. Never describe the image clinically; this is a roast, not narration.
 
 You control fabrication machines through MOPS tools.
 - Pay close attention to what the user says. If they mention a filename, use it immediately. Do not ask for info they already gave you.
@@ -332,6 +334,28 @@ class MopsLLM:
             except Exception:
                 pass
             self._mcp_stderr_fh = None
+
+    def _maybe_attach_image(self, tool_use, result_text: str):
+        """Wrap a tool_result in multimodal content if a PNG was loaded.
+
+        Looks at file_path on load_file/setup_cut tool_use blocks. If the
+        file is a PNG and the configured probability gate passes, returns
+        a list of [text, image] content blocks suitable for tool_result.
+        Otherwise returns the original text string.
+        """
+        if tool_use.name not in ("load_file", "setup_cut"):
+            return result_text
+        file_path = (tool_use.input or {}).get("file_path")
+        if not file_path:
+            return result_text
+        cfg = self.config.get("image_roast") or {}
+        probability = float(cfg.get("probability", 0))
+        max_dim = int(cfg.get("max_dim", 512))
+        block = maybe_build_attachment(file_path, probability, max_dim=max_dim)
+        if block is None:
+            return result_text
+        log.info("attaching image preview from %s", file_path)
+        return [{"type": "text", "text": result_text}, block]
 
     async def _execute_tool(self, name: str, input_data: dict) -> str:
         """Execute a tool via MCP. Returns result string."""
@@ -659,10 +683,11 @@ class MopsLLM:
                 short = result[:60] + "..." if len(result) > 60 else result
                 tool_summaries.append(f"{tu.name} → {short}")
 
+                content = self._maybe_attach_image(tu, result)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tu.id,
-                    "content": result,
+                    "content": content,
                 })
 
             messages.append({"role": "user", "content": tool_results})
