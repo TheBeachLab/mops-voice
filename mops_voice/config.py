@@ -16,7 +16,16 @@ DEFAULT_CONFIG = {
     },
     "mops_server_path": "../mops/src/server.js",
     "whisper_model": "base.en",
+    "llm_engine": "cli",
     "claude_model": "sonnet",
+    "anthropic": {
+        "api_key": "",
+    },
+    "tts_engine": "f5",
+    "voxtral": {
+        "api_key": "",
+        "voice": "en_paul_confident",
+    },
 }
 
 

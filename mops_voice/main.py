@@ -3,21 +3,29 @@
 import argparse
 import asyncio
 import os
+import queue
+import re
 import threading
 import time
 from pathlib import Path
+
+_SENTENCE_BOUNDARY = re.compile(r"[.!?](\s|$)")
 
 from rich.console import Console
 
 from mops_voice.config import load_config, CONFIG_DIR
 from mops_voice.audio import record_until_release, play_audio, audio_to_wav_bytes
 from mops_voice.transcribe import Transcriber, is_gibberish
-from mops_voice.tts import Synthesizer
+from mops_voice.tts import create_synthesizer
 from mops_voice.llm import MopsLLM
+from mops_voice.logging_setup import setup_logging, redact
+
+import logging
 
 console = Console()
+log = logging.getLogger("mops_voice.main")
 
-EXIT_PHRASES = {"goodbye", "exit", "quit", "bye"}
+EXIT_PHRASES = {"goodbye", "exit", "quit", "bye", "quit mops", "goodbye mops"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -31,10 +39,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--whisper-model", type=str, default=None, help="Whisper model name"
     )
+    parser.add_argument(
+        "--tts-engine", type=str, default=None,
+        choices=["f5", "voxtral"],
+        help="TTS engine: f5 (local MLX) or voxtral (Mistral API)",
+    )
+    parser.add_argument(
+        "--llm-engine", type=str, default=None,
+        choices=["cli", "api"],
+        help="LLM engine: cli (Claude Code CLI) or api (direct Anthropic API)",
+    )
+    parser.add_argument(
+        "--user", type=str, default=None,
+        help="User name (e.g. --user Fran)",
+    )
     return parser.parse_args(argv)
 
 
 async def run(argv: list[str] | None = None):
+    log_file = setup_logging()
     args = parse_args(argv)
     config = load_config()
     config_path = CONFIG_DIR / "config.json"
@@ -42,6 +65,28 @@ async def run(argv: list[str] | None = None):
     # Override config from CLI args
     if args.whisper_model:
         config["whisper_model"] = args.whisper_model
+    if args.tts_engine:
+        config["tts_engine"] = args.tts_engine
+    if args.llm_engine:
+        config["llm_engine"] = args.llm_engine
+    if args.user:
+        config["user_name"] = args.user
+
+    log.info(
+        "startup: engine=%s model=%s tts=%s whisper=%s user=%s headless=%s mods_url=%s",
+        config.get("llm_engine"),
+        config.get("claude_model"),
+        config.get("tts_engine"),
+        config.get("whisper_model"),
+        config.get("user_name"),
+        bool(args.headless),
+        args.mods_url or "<default>",
+    )
+    log.debug(
+        "secrets: anthropic=%s voxtral=%s",
+        redact(config.get("anthropic", {}).get("api_key", "")),
+        redact(config.get("voxtral", {}).get("api_key", "")),
+    )
 
     # --- Startup checks ---
     import sounddevice as sd
@@ -53,14 +98,17 @@ async def run(argv: list[str] | None = None):
         console.print("[red]No microphone detected. Cannot start.[/red]")
         return
 
-    # Check claude CLI
-    if not MopsLLM.check_cli():
+    # Check claude CLI (only needed for CLI engine)
+    llm_engine = config.get("llm_engine", "cli")
+    if llm_engine == "cli" and not MopsLLM.check_cli():
         console.print("[red]Claude CLI not found.[/red]")
         console.print("Install it: https://docs.anthropic.com/en/docs/claude-code")
         return
 
     console.print("[bold cyan]MOPS Voice Assistant[/bold cyan]")
     console.print(f"Assistant: {config['assistant_name']}  |  User: {config['user_name']}")
+    llm_label = "Anthropic API" if llm_engine == "api" else "Claude CLI"
+    console.print(f"LLM: {config['claude_model']} via {llm_label}")
     p = config["personality"]
     console.print(
         f"Personality: humor={p['humor']}% sarcasm={p['sarcasm']}% honesty={p['honesty']}%"
@@ -78,17 +126,17 @@ async def run(argv: list[str] | None = None):
         console.print(f"[red]FAILED: {e}[/red]")
         return
 
-    # TTS — try XTTS server first, fall back to F5-TTS with reference audio
-    ref_audio = CONFIG_DIR / "tars_reference.wav"
-    ref_text = CONFIG_DIR / "tars_reference.txt"
+    # TTS engine
     synthesizer = None
-    console.print("🔊 Loading TTS...", end=" ")
+    engine_name = config.get("tts_engine", "f5")
+    console.print(f"🔊 Loading TTS ({engine_name})...", end=" ")
     try:
-        synthesizer = Synthesizer(ref_audio, ref_text)
-        if synthesizer._use_xtts:
-            console.print("[green]OK (XTTS server — TARS voice)[/green]")
-        else:
-            console.print("[green]OK (F5-TTS with reference audio)[/green]")
+        synthesizer = create_synthesizer(config)
+        engine_labels = {
+            "f5": "F5-TTS local, MLX",
+            "voxtral": "Voxtral, Mistral API",
+        }
+        console.print(f"[green]OK ({engine_labels.get(engine_name, engine_name)})[/green]")
     except FileNotFoundError as e:
         console.print(f"[yellow]WARN: {e}[/yellow]")
         console.print("[yellow]   TTS disabled — text-only mode[/yellow]")
@@ -122,7 +170,26 @@ async def run(argv: list[str] | None = None):
         console.print("[yellow]   Conversation-only mode (no machine control)[/yellow]")
 
     console.print()
-    console.print("[bold]Hold SPACEBAR to talk. Ctrl+C to exit.[/bold]")
+    console.print("[bold]SPACEBAR = talk  |  ESC = cancel  |  Q = quit[/bold]")
+    console.print()
+
+    # --- Greeting ---
+    loop = asyncio.get_running_loop()
+    greeting = await llm.chat(
+        f"(System: {config['user_name']} just started a session. "
+        f"Greet them with a short, personality-driven one-liner. "
+        f"Be creative — reference fabrication machines, past disasters, "
+        f"or tease them about what they might be up to today.)"
+    )
+    console.print(f"🤖 [green]{greeting}[/green]")
+    if synthesizer:
+        try:
+            audio, sr = await loop.run_in_executor(
+                None, synthesizer.synthesize, greeting
+            )
+            await loop.run_in_executor(None, play_audio, audio, sr)
+        except Exception:
+            pass
     console.print()
 
     # --- Keyboard listener ---
@@ -131,6 +198,8 @@ async def run(argv: list[str] | None = None):
 
     recording = False
     stop_event = threading.Event()
+    quit_event = threading.Event()
+    cancel_event = threading.Event()
     space_held = False
 
     # Get our terminal's PID to check focus
@@ -150,6 +219,16 @@ async def run(argv: list[str] | None = None):
 
     def on_press(key):
         nonlocal recording, space_held
+        # 'q' to quit cleanly
+        if hasattr(key, 'char') and key.char == 'q' and not recording:
+            if _terminal_is_focused():
+                quit_event.set()
+                return
+        # ESC to cancel current operation
+        if key == keyboard.Key.esc:
+            if _terminal_is_focused():
+                cancel_event.set()
+                return
         if key == keyboard.Key.space and not space_held:
             if not _terminal_is_focused():
                 return
@@ -178,15 +257,18 @@ async def run(argv: list[str] | None = None):
     tty.setcbreak(sys.stdin.fileno())
 
     # --- Main loop ---
-    loop = asyncio.get_running_loop()
-
     try:
         while True:
-            # Wait for spacebar press
+            # Wait for spacebar press or 'q' to quit
             while not recording:
+                if quit_event.is_set():
+                    break
                 await asyncio.sleep(0.05)
+            if quit_event.is_set():
+                break
 
             console.print("🎤 [bold red]Recording...[/bold red]", end=" ")
+            log.info("--- new turn ---")
 
             # Record in thread
             audio_data = await loop.run_in_executor(
@@ -195,10 +277,12 @@ async def run(argv: list[str] | None = None):
 
             if audio_data is None or audio_data.size == 0:
                 console.print("[yellow]No audio captured[/yellow]")
+                log.info("turn skipped: no audio captured")
                 continue
 
             duration = len(audio_data) / 16000
             console.print(f"[green]{duration:.1f}s[/green]")
+            log.info("recorded %.2fs audio", duration)
 
             # Transcribe
             wav_bytes = audio_to_wav_bytes(audio_data)
@@ -211,13 +295,16 @@ async def run(argv: list[str] | None = None):
                 None, transcriber.transcribe, wav_bytes
             )
             console.print(f'[cyan]"{text}"[/cyan]')
+            log.info("transcribed: %r", text)
 
             if is_gibberish(text):
                 console.print("[yellow]Didn't catch that, Fran.[/yellow]")
+                log.info("rejected as gibberish")
                 continue
 
             # Check for exit
-            if text.strip().lower().rstrip(".!") in EXIT_PHRASES:
+            clean = text.strip().lower().rstrip(".!,")
+            if clean in EXIT_PHRASES or any(p in clean for p in EXIT_PHRASES):
                 console.print("", end="")
                 farewell = await llm.chat("Fran is leaving. Say a brief goodbye.")
                 console.print(f"[green]{farewell}[/green]")
@@ -232,38 +319,128 @@ async def run(argv: list[str] | None = None):
                 break
 
             # Claude + tools
+            cancel_event.clear()
             t0 = time.monotonic()
             console.print(f"🤖 Calling Claude ({config['claude_model']})...")
+
+            # Background speech queue for tool progress.
+            # task_done() is called on every popped item so `unfinished_tasks`
+            # reflects both "queued" and "currently playing". That's what the
+            # pacing gate (wait_for_speech) polls to sync voice and actions.
+            speech_queue: queue.Queue[str | None] = queue.Queue()
+            speech_done = threading.Event()
+
+            def _speech_worker():
+                """Drain the speech queue, synthesizing and playing each phrase."""
+                while True:
+                    phrase = speech_queue.get()
+                    try:
+                        if phrase is None:  # poison pill
+                            break
+                        if cancel_event.is_set():
+                            continue
+                        try:
+                            audio, sr = synthesizer.synthesize(phrase)
+                            if not cancel_event.is_set():
+                                play_audio(audio, sr)
+                        except Exception:
+                            pass
+                    finally:
+                        speech_queue.task_done()
+                speech_done.set()
+
+            async def wait_for_speech(timeout: float = 30.0) -> bool:
+                """Block until the speech queue has fully drained (synth + playback).
+
+                Used as the voice-action pacing gate: _chat_api awaits this
+                after a response with tool_use blocks and before executing
+                those tools, so the user always hears the narration that
+                describes an action *before* the action fires.
+                """
+                if not synthesizer:
+                    return True
+                start = time.monotonic()
+                while time.monotonic() - start < timeout:
+                    if cancel_event.is_set():
+                        return False
+                    if speech_queue.unfinished_tasks == 0:
+                        return True
+                    await asyncio.sleep(0.05)
+                return False
+
+            sentence_buffer = ""
+            first_text_chunk_seen = False
+            first_text_t: float | None = None
+
+            if synthesizer:
+                speech_thread = threading.Thread(target=_speech_worker, daemon=True)
+                speech_thread.start()
 
             def on_tool_call(name, summary):
                 console.print(f"  🔧 Tool call: {name} → {summary}")
 
-            response_text = await llm.chat(text, on_tool_call=on_tool_call)
+            def on_text_chunk(delta: str):
+                nonlocal sentence_buffer, first_text_chunk_seen, first_text_t
+                if not first_text_chunk_seen:
+                    first_text_chunk_seen = True
+                    first_text_t = time.monotonic()
+                    log.info("first text delta at %.2fs", first_text_t - t0)
+                if cancel_event.is_set() or not synthesizer:
+                    return
+                sentence_buffer += delta
+                while True:
+                    m = _SENTENCE_BOUNDARY.search(sentence_buffer)
+                    if not m:
+                        break
+                    end = m.end()
+                    sentence = sentence_buffer[:end].strip()
+                    sentence_buffer = sentence_buffer[end:]
+                    if sentence:
+                        log.debug("enqueue sentence: %r", sentence)
+                        speech_queue.put(sentence)
+
+            try:
+                response_text = await llm.chat(
+                    text,
+                    on_tool_call=on_tool_call,
+                    on_text_chunk=on_text_chunk,
+                    wait_for_speech=wait_for_speech,
+                )
+            except Exception:
+                log.exception("llm.chat failed")
+                raise
+
+            if synthesizer:
+                # Push any trailing sentence that didn't end in punctuation.
+                tail = sentence_buffer.strip()
+                if tail:
+                    speech_queue.put(tail)
+                speech_queue.put(None)  # poison pill
+
+            if cancel_event.is_set():
+                console.print("[yellow]Cancelled.[/yellow]")
+                cancel_event.clear()
+                continue
+
             console.print(f"🤖 Response: [green]{response_text}[/green]")
 
-            # TTS
+            # Wait for the speech worker to drain the queue (tool phrases +
+            # streamed sentences). Generation and synthesis already overlapped
+            # while the tokens were arriving — this just blocks for playback.
             if synthesizer:
-                console.print("🔊 Synthesizing speech...", end=" ")
-                try:
-                    audio, sr = await loop.run_in_executor(
-                        None, synthesizer.synthesize, response_text
-                    )
-                    audio_duration = len(audio) / sr
-                    console.print(f"[green]{audio_duration:.1f}s[/green]")
-                    console.print("🔊 Playing...", end=" ")
-                    await loop.run_in_executor(None, play_audio, audio, sr)
-                    console.print("[green]done[/green]")
-                except Exception as e:
-                    console.print(f"[red]TTS error: {e}[/red]")
+                speech_done.wait(timeout=60)
 
             elapsed = time.monotonic() - t0
             console.print(f"⏱️  Total: {elapsed:.1f}s")
             console.print()
+            log.info("turn complete: %.2fs total, response=%r", elapsed, response_text)
 
     except KeyboardInterrupt:
         console.print("\n[bold]Shutting down...[/bold]")
+        log.info("shutting down via KeyboardInterrupt")
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
         listener.stop()
         await llm.disconnect_mcp()
+        log.info("session end — log at %s", log_file)
         console.print("[bold cyan]MOPS out.[/bold cyan]")

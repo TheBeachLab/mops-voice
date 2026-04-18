@@ -17,16 +17,17 @@ def test_build_system_prompt_includes_personality():
     prompt = build_system_prompt(config)
     assert "MOPS" in prompt
     assert "Fran" in prompt
-    assert "humor=75%" in prompt
-    assert "sarcasm=50%" in prompt
-    assert "honesty=90%" in prompt
+    assert "Humor: 75%" in prompt
+    assert "Sarcasm: 50%" in prompt
+    assert "Honesty: 90%" in prompt
 
 
 def test_build_system_prompt_updates_with_changed_dials():
     config = copy.deepcopy(DEFAULT_CONFIG)
     config["personality"]["humor"] = 10
     prompt = build_system_prompt(config)
-    assert "humor=10%" in prompt
+    assert "Humor: 10%" in prompt
+    assert "dry and professional" in prompt
 
 
 def test_build_system_prompt_includes_tools():
@@ -44,7 +45,7 @@ def test_build_system_prompt_no_tools():
 
 def test_max_constants():
     assert MAX_HISTORY_TURNS == 10
-    assert MAX_TOOL_LOOPS == 10
+    assert MAX_TOOL_LOOPS == 20
 
 
 def test_format_history_empty():

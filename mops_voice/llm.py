@@ -2,25 +2,35 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
-import urllib.request
+import time
 from pathlib import Path
+
+import anthropic
 
 from mops_voice.personality import (
     adjust_personality,
     get_personality,
 )
+from mops_voice.logging_setup import mcp_stderr_file, redact
+
+log = logging.getLogger("mops_voice.llm")
 
 MAX_HISTORY_TURNS = 10
-MAX_TOOL_LOOPS = 10
+# A full GX-24 setup-plus-send uses ~9 tool-loop iterations on the happy
+# path (4 cutting phases + 5 sending steps). 20 gives room for parameter
+# probes and error recovery without aborting mid-workflow.
+MAX_TOOL_LOOPS = 20
 
-# Map short aliases to full model IDs for the API
+# Map short aliases to bare model IDs. Bare aliases always resolve to a
+# supported version; date-suffixed variants can silently break on retirement.
 MODEL_ALIASES = {
-    "haiku": "claude-haiku-4-5-20251001",
-    "sonnet": "claude-sonnet-4-5-20250514",
-    "opus": "claude-opus-4-0-20250514",
+    "haiku": "claude-haiku-4-5",
+    "sonnet": "claude-sonnet-4-5",
+    "opus": "claude-opus-4-5",
 }
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -37,7 +47,12 @@ Your personality is NOT optional. Even when executing tools, your spoken respons
 CRITICAL RULES:
 - Your responses will be spoken aloud through TTS. Write ONLY plain spoken text.
 - NO markdown, NO bullet points, NO bold, NO headers, NO lists, NO emojis.
-- Keep responses to 1-3 short sentences. Be brief like a real conversation.
+- Your text streams to speech sentence-by-sentence as you type, and speech is SLOWER than the tools. Every word costs real wall-clock time and the user hears narration lag the action. Be brutally terse.
+- Across a FULL turn (which may span several tool-use rounds), emit AT MOST 2-3 short sentences TOTAL: one opening acknowledgment, one closing status, plus optionally one note IF something unusual happens (an error, a surprise).
+- In intermediate responses (ones that end with tool_use), emit AT MOST ONE very short sentence (5-10 words), or no sentence at all. The runtime blocks tool execution until that sentence finishes playing, so extra words directly slow the machine.
+- NEVER preview upcoming steps ("now let me...", "next I'll...", "I'll load the program and your file"). NEVER restate at the end what you already said or what the tools already did.
+- Keep each sentence short — under 15 words when you can.
+- NEVER tell the user to "select", "pick", or "choose" a device in the browser. MOPS auto-selects via CDP when a device is physically plugged in. If no device shows up, the fix is for the user to PLUG IT IN, not to click anything in the browser.
 - Never volunteer your personality settings unless specifically asked.
 - Never format responses as documentation or instructions.
 - Talk like a human, not a manual.
@@ -49,36 +64,62 @@ You control fabrication machines through MOPS tools.
 - If a tool call fails, say so honestly. NEVER claim success when a tool returned an error.
 - If a tool call SUCCEEDS, acknowledge it. NEVER claim tools are missing or unavailable when they just worked.
 - When the user says to just "cut", "send", or finish — do NOT repeat the full setup workflow. Only do the remaining steps (connect device + send).
-- Before using trigger_action, ALWAYS call get_program_state first to find the exact module names and button names. Use those exact names.
+- Before calling trigger_action OR set_parameter with a module_name you haven't seen in the CURRENT turn's tool results, ALWAYS call get_program_state first to find exact module, parameter, and button names. Don't guess — module names and parameter labels differ per machine (speed lives on the "Roland GX/GS-24 Relative" module, not "cut raster").
+- If a prior turn already did part of the workflow (device connected, program loaded, speed set) and is visible in conversation history, DO NOT redo it. Jump to the remaining step. "Skip to step 3" means skip to step 3, don't re-run Phase 1 "just to check".
 - To resize output to a specific physical size, use set_physical_size (NOT manual DPI calculation).
 
-CUTTING WORKFLOW — follow these steps IN ORDER, never skip any:
-1. launch_browser (open mods if not already open)
-2. find_machine — returns a JSON array of machines sorted by relevanceScore (highest first). Pick scored[0], then choose the entry from its matchingPrograms whose path most specifically matches the machine model (e.g. for "Roland GX-24", prefer a path containing "GX-24" over a generic "roland" path). Pass that exact path to load_program.
-3. load_program (load the cutting/milling program for that machine)
-4. load_file (load the user's file — REQUIRED before setting size)
-5. set_physical_size (set desired width, height, and unit — e.g. 10, 10, "cm". PNG only.)
-6. Set any cut parameters if requested (speed, depth, tool, etc.) using set_parameter or set_parameters.
-7. Tell the user the job is ready and ask for confirmation to cut/send.
+CUTTING WORKFLOW — run these phases in order. Parallelize WITHIN a phase; never merge tool_use blocks across phases (later phases depend on side effects of earlier ones).
 
-IMPORTANT RULES:
-- set_physical_size ONLY works with PNG files. For vector formats (SVG, DXF, HPGL), dimensions come from the file itself.
-- Do NOT send to the machine until the user explicitly says "cut", "send", or "go".
+PHASE A — BOOT (parallel): launch_browser + find_machine
+- find_machine returns a JSON array sorted by relevanceScore. Pick scored[0], then choose the matchingPrograms entry whose path most specifically matches the machine (e.g. for "Roland GX-24" prefer a path containing "GX-24" over a generic "roland" path). Pass that exact path to load_program in Phase B.
+
+PHASE B — LOAD PROGRAM (alone): load_program with the selected path.
+
+PHASE C — LOAD FILE (alone): load_file. Must fully return before any size setting — set_physical_size reads state that load_file writes.
+
+PHASE D — SIZE & PARAMS (parallel): set_physical_size + set_parameter(s) for any requested cut settings (speed, depth, tool).
+- set_physical_size ONLY works with PNG. Vector formats (SVG, DXF, HPGL) carry their own dimensions.
+
+Then tell the user the job is ready and ask for confirmation to cut/send.
+
+Do NOT send to the machine until the user explicitly says "cut", "send", or "go".
 
 SENDING TO MACHINE (only when user says "cut"/"send"/"go"):
-1. get_program_state — find the on/off switch connected to WebUSB, the WebUSB module itself, and which module has the "calculate" button.
-2. Ensure the on/off switch is ON: set_parameter(module_name="on/off:MODULE_ID", parameter="on/off", value="true").
-3. trigger_action on the WebUSB module — click "Get Device". MOPS auto-selects via CDP (first session) or silently reconnects via getDevices() (subsequent sessions). Do NOT tell the user to select anything.
-4. trigger_action — click "calculate" on the toolpath module (usually has "raster", "path", or "distance" in its name). This generates the toolpath and sends it to the WebUSB module. The WebUSB module's third button label will change from "waiting for file" to "send file".
-5. Call get_program_state again to confirm the button is now labeled "send file", then trigger_action on the WebUSB module — click "send file" to start the machine.
+Each numbered step is its own response unless it says "parallel". Do NOT collapse two numbered steps into one response — each step's result is a precondition for the next.
 
-Once the device is connected (step 3), it stays connected for the session. For subsequent sends, skip to step 3.
+STEP 1 — SETUP (parallel, in ONE response):
+- get_program_state (to find the on/off switch, WebUSB module ID, and the toolpath module with "calculate")
+- set_parameter(module_name="on/off:MODULE_ID", parameter="", value="true") — on/off is a checkbox; leave `parameter` BLANK, not "on/off".
+- trigger_action(module_name="WebUSB", action="Get Device")
+
+STEP 2 — VERIFY DEVICE (alone, MANDATORY, no exceptions):
+- list_devices
+If the result is empty or does not show the target machine, STOP. Tell the user the cutter is not plugged in and ask them to plug it into USB. Do NOT speak before list_devices returns. Do NOT skip this step. Do NOT move on to step 3 without a matching device in the result.
+
+STEP 3 — CALCULATE (alone):
+- trigger_action on the toolpath module — click "calculate". Do not include any other tool_use block in this response.
+
+STEP 4 — CHECK SEND BUTTON (alone):
+- get_program_state — confirm the WebUSB module's send button is now labeled "send file" (it was "waiting for file" before calculate).
+
+STEP 5 — SEND (alone):
+- trigger_action(module_name="WebUSB", action="send file")
+If `clicked` is anything other than "send file" (e.g. "waiting for file"), the send FAILED. Tell the user honestly — do NOT claim the machine is running.
+
+Once a device is connected (step 2), it stays connected for the session. For subsequent sends, skip to step 3.
 
 CRITICAL — READ CAREFULLY:
+- calculate MUST run AFTER the on/off is ON and "Get Device" has been clicked AND list_devices has confirmed a device. Never parallelize calculate with setup tools.
+- trigger_action returning {{success: true}} only confirms a button was clicked. ALWAYS compare the `clicked` field to the action you requested — if they differ, the operation failed.
 - On/off switches are CHECKBOXES, not buttons. Use set_parameter, NEVER trigger_action on an on/off module.
-- "calculate" generates the toolpath but does NOT start the machine. You MUST click "send file" on the WebUSB module after calculate.
-- The WebUSB send button is labeled "send file" (not "send") and only appears after calculate fires. Always re-check with get_program_state after calculate.
-- NEVER tell the user to manually select a device. MOPS handles it automatically via CDP.
+- The WebUSB send button label toggles between "waiting for file" and "send file". After calculate it should flip to "send file"; if it doesn't, something is wrong.
+- NEVER claim the machine is cutting/running on the basis of {{success: true}} alone. Verify via list_devices AND via the post-click button label.
+
+MODS FILE OUTPUT — read before the user says "save the file", "export", etc:
+- `save_program` dumps the program's JSON CONFIG, not the cut file. Do NOT call save_program when the user asks to save/export the cut file.
+- The cut file is produced by the `save file` module, which auto-downloads to the user's Downloads folder when a toolpath FLOWS THROUGH IT. The trigger is calculate on the toolpath module — NOT a button on the save module itself (`save file` has no button to click).
+- If the user asks to save/export the cut file: (1) if no toolpath has been calculated yet this turn, run STEP 3 (calculate) first; (2) mention that the file should land in ~/Downloads. Don't promise a specific filename unless a tool response gave you one; "postMessage.png.camm" style names are mods internals, not user-friendly.
+- The `calculate` button lives on the TOOLPATH module (usually named "cut raster", "mill raster", etc.) — NOT on upstream modules like "distance transform", "edge detect", "offset", "image threshold" (those only have a "view" button). If you don't have the exact toolpath module name in recent context, call get_program_state first.
 When a personality setting is changed, respond with PERSONALITY_UPDATE:dial=value on its own line \
 (e.g. PERSONALITY_UPDATE:humor=90) followed by a brief spoken confirmation.
 Only report your settings when explicitly asked.
@@ -156,6 +197,33 @@ def _format_history(history: list[dict]) -> str:
 _TOOL_CALL_RE = re.compile(r'^TOOL_CALL:(.+)$', re.MULTILINE)
 
 
+def _block_to_input_dict(block) -> dict:
+    """Convert an SDK content block back to the minimal dict the Messages API
+    accepts on input. `block.model_dump()` also includes response-only fields
+    (`parsed_output`, `citations`, `caller`) that trigger a 400 on echo."""
+    t = block.type
+    if t == "text":
+        return {"type": "text", "text": block.text}
+    if t == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": block.id,
+            "name": block.name,
+            "input": block.input,
+        }
+    if t == "thinking":
+        out = {"type": "thinking", "thinking": block.thinking}
+        sig = getattr(block, "signature", None)
+        if sig is not None:
+            out["signature"] = sig
+        return out
+    # Unknown block type — strip known response-only fields as a fallback.
+    d = block.model_dump(exclude_none=True)
+    for key in ("parsed_output", "citations", "caller"):
+        d.pop(key, None)
+    return d
+
+
 def _parse_tool_calls(text: str) -> tuple[list[dict], str]:
     """Extract TOOL_CALL directives and remaining spoken text."""
     tool_calls = []
@@ -179,7 +247,15 @@ class MopsLLM:
         self._mcp_tools: list[dict] = []
         self._mcp_cm = None
         self._mcp_session_cm = None
+        self._mcp_stderr_fh = None
         self._tool_descriptions = ""
+        self._anthropic: anthropic.AsyncAnthropic | None = None
+
+    def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:
+        """Lazily construct the async Anthropic client."""
+        if self._anthropic is None:
+            self._anthropic = anthropic.AsyncAnthropic(api_key=self._get_api_key())
+        return self._anthropic
 
     @staticmethod
     def check_cli() -> bool:
@@ -193,20 +269,30 @@ class MopsLLM:
             from mcp.client.stdio import stdio_client
 
             args = [server_path] + (extra_args or [])
+            log.info("connecting MCP: node %s", " ".join(args))
             server_params = StdioServerParameters(command="node", args=args)
 
-            self._mcp_cm = stdio_client(server_params)
+            # Route the MCP subprocess's stderr into our log file so every
+            # [mops] line from server.js/browser.js is captured alongside
+            # our own Python logs.
+            self._mcp_stderr_fh = mcp_stderr_file()
+            self._mcp_cm = stdio_client(server_params, errlog=self._mcp_stderr_fh)
             read, write = await self._mcp_cm.__aenter__()
             self._mcp_session_cm = ClientSession(read, write)
             self._mcp_session = await self._mcp_session_cm.__aenter__()
             await self._mcp_session.initialize()
 
-            # Discover tools and build descriptions for system prompt
             tools_result = await self._mcp_session.list_tools()
             self._mcp_tools = tools_result.tools
             self._tool_descriptions = self._format_tool_descriptions()
+            log.info(
+                "MCP connected: %d tools (%s)",
+                len(self._mcp_tools),
+                ", ".join(t.name for t in self._mcp_tools),
+            )
             return True
-        except Exception as e:
+        except Exception:
+            log.exception("MCP connection failed")
             self._mcp_session = None
             self._mcp_tools = []
             return False
@@ -234,32 +320,56 @@ class MopsLLM:
             try:
                 await self._mcp_session_cm.__aexit__(None, None, None)
             except Exception:
-                pass
+                log.exception("MCP session close failed")
         if self._mcp_cm:
             try:
                 await self._mcp_cm.__aexit__(None, None, None)
             except Exception:
+                log.exception("MCP transport close failed")
+        if self._mcp_stderr_fh:
+            try:
+                self._mcp_stderr_fh.close()
+            except Exception:
                 pass
+            self._mcp_stderr_fh = None
 
     async def _execute_tool(self, name: str, input_data: dict) -> str:
         """Execute a tool via MCP. Returns result string."""
+        t0 = time.monotonic()
+        log.info("tool → %s(%s)", name, json.dumps(input_data, default=str)[:400])
+
         # Handle personality tools locally
         if name == "adjust_personality":
             result = adjust_personality(
                 self.config, self.config_path,
                 input_data.get("dial", ""), input_data.get("value", 0)
             )
-            return json.dumps(result) if isinstance(result, dict) else result
+            out = json.dumps(result) if isinstance(result, dict) else result
+            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
+            return out
         if name == "get_personality":
-            return json.dumps(get_personality(self.config))
+            out = json.dumps(get_personality(self.config))
+            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
+            return out
 
         # Execute via MCP
         if not self._mcp_session:
+            log.warning("tool ✖ %s: MCP not connected", name)
             return "Tool unavailable, MCP server not connected."
         try:
             result = await self._mcp_session.call_tool(name, input_data)
-            return result.content[0].text if result.content else "OK"
+            out = result.content[0].text if result.content else "OK"
+            is_error = getattr(result, "isError", False)
+            tag = "ERR" if is_error else "OK"
+            log.info(
+                "tool ← %s [%s] %.2fs: %s",
+                name, tag, time.monotonic() - t0, out[:400].replace("\n", " "),
+            )
+            if len(out) > 400:
+                log.debug("tool %s full result: %s", name, out)
+            return out
         except Exception as e:
+            log.exception("tool ✖ %s %.2fs", name, time.monotonic() - t0)
             return f"Tool error: {e}"
 
     def _prune_history(self):
@@ -299,21 +409,35 @@ class MopsLLM:
             "--setting-sources", "",
         ]
 
+        log.debug("claude CLI prompt: %s", prompt[:600])
+        t0 = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        stdout, stderr = await proc.communicate()
+        elapsed = time.monotonic() - t0
         output = stdout.decode("utf-8").strip()
 
-        if proc.returncode != 0 or not output:
+        if proc.returncode != 0:
+            log.error(
+                "claude CLI exited %s in %.2fs: stderr=%s",
+                proc.returncode, elapsed,
+                stderr.decode("utf-8", errors="replace")[:600],
+            )
+            return ""
+        if not output:
+            log.warning("claude CLI returned empty output in %.2fs", elapsed)
             return ""
 
         try:
             result = json.loads(output)
-            return result.get("result", "")
+            text = result.get("result", "")
+            log.debug("claude CLI response (%.2fs): %s", elapsed, text[:600])
+            return text
         except json.JSONDecodeError:
+            log.debug("claude CLI raw response (%.2fs): %s", elapsed, output[:600])
             return output
 
     # --- Direct Anthropic API path ---
@@ -365,52 +489,92 @@ class MopsLLM:
             messages.append({"role": "assistant", "content": entry["assistant"]})
         return messages
 
-    async def _call_api(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
-        """Call Anthropic Messages API directly. Returns the response dict."""
-        api_key = self._get_api_key()
+    async def _stream_api(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_text_chunk=None,
+    ):
+        """Stream one Anthropic API call. Returns the final `Message` object.
+
+        While streaming, forwards text deltas to `on_text_chunk` as they
+        arrive (only for `text`-type content blocks — `tool_use` arg tokens
+        are intentionally not streamed to TTS). Tool-use blocks are collected
+        in the final message so the caller can dispatch them.
+        """
+        client = self._get_anthropic_client()
         system_prompt = build_system_prompt(self.config, self._tool_descriptions)
 
-        body = {
+        # Prompt caching: marker on the last system block caches tools + system.
+        kwargs = {
             "model": self._resolve_model(),
             "max_tokens": 300,
-            "system": system_prompt,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "messages": messages,
         }
         if tools:
-            body["tools"] = tools
+            kwargs["tools"] = tools
 
-        payload = json.dumps(body).encode()
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=payload,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
+        log.debug(
+            "anthropic stream → model=%s msgs=%d tools=%d key=%s",
+            kwargs["model"], len(messages), len(tools or []),
+            redact(self._get_api_key()),
         )
+        log.debug("anthropic stream messages: %s", json.dumps(messages, default=str)[:1200])
 
-        loop = asyncio.get_running_loop()
-        resp_body = await loop.run_in_executor(None, self._do_api_request, req)
-        return resp_body
+        t0 = time.monotonic()
+        current_block_type: str | None = None
 
-    @staticmethod
-    def _do_api_request(req) -> dict:
-        """Synchronous HTTP request (runs in executor)."""
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            try:
-                err = json.loads(body)
-                msg = err.get("error", {}).get("message", body)
-            except json.JSONDecodeError:
-                msg = body
-            return {"_error": True, "message": msg, "status": e.code}
+        async with client.messages.stream(**kwargs) as stream:
+            async for event in stream:
+                etype = getattr(event, "type", None)
+                if etype == "content_block_start":
+                    current_block_type = getattr(event.content_block, "type", None)
+                elif etype == "content_block_stop":
+                    current_block_type = None
+                elif etype == "content_block_delta":
+                    delta = getattr(event, "delta", None)
+                    if (
+                        on_text_chunk
+                        and current_block_type == "text"
+                        and getattr(delta, "type", None) == "text_delta"
+                    ):
+                        try:
+                            on_text_chunk(delta.text)
+                        except Exception:
+                            log.exception("on_text_chunk raised")
+            final = await stream.get_final_message()
 
-    async def _chat_api(self, user_text: str, on_tool_call=None) -> str:
-        """Chat via direct Anthropic API with native tool_use."""
+        elapsed = time.monotonic() - t0
+        usage = final.usage
+        # Surface cache metrics at INFO so they're easy to grep and trend.
+        # `cache_read` > 0 = cache hit (cheap+fast);
+        # `cache_write` > 0 = first-seen prefix being stored (~1.25×);
+        # `input` is the uncached remainder only.
+        log.info(
+            "anthropic API ← %.2fs stop=%s input=%d cache_read=%d cache_write=%d output=%d",
+            elapsed, final.stop_reason,
+            getattr(usage, "input_tokens", 0) or 0,
+            getattr(usage, "cache_read_input_tokens", 0) or 0,
+            getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            getattr(usage, "output_tokens", 0) or 0,
+        )
+        return final
+
+    async def _chat_api(
+        self,
+        user_text: str,
+        on_tool_call=None,
+        on_text_chunk=None,
+        wait_for_speech=None,
+    ) -> str:
+        """Chat via direct Anthropic API with native tool_use + streaming."""
         self._prune_history()
 
         messages = self._history_to_api_messages()
@@ -420,39 +584,30 @@ class MopsLLM:
         tool_summaries = []
 
         for _iteration in range(MAX_TOOL_LOOPS):
-            response = await self._call_api(messages, tools)
-
-            if not response:
-                return "I'm having trouble thinking right now, Fran. Try again."
-
-            if response.get("_error"):
-                # API failed — fall back to CLI with context about the error
+            try:
+                final = await self._stream_api(messages, tools, on_text_chunk)
+            except anthropic.APIError as e:
+                log.exception("anthropic API error, falling back to CLI")
                 fallback_prompt = (
-                    f"(System note: the Anthropic API call failed with: "
-                    f"{response.get('message', 'unknown error')}. "
+                    f"(System note: the Anthropic API call failed with: {e}. "
                     f"Briefly tell Fran about this issue in a conversational way, "
                     f"then try to answer their original question.)\n\n"
                     f"Fran said: {user_text}"
                 )
                 return await self._chat_cli(fallback_prompt, on_tool_call)
 
-            if "content" not in response:
-                return "I'm having trouble thinking right now, Fran. Try again."
-
-            # Collect text and tool_use blocks from response
-            text_parts = []
+            text_parts: list[str] = []
             tool_uses = []
-            for block in response["content"]:
-                if block["type"] == "text":
-                    text_parts.append(block["text"])
-                elif block["type"] == "tool_use":
+            for block in final.content:
+                if block.type == "text":
+                    text_parts.append(block.text)
+                elif block.type == "tool_use":
                     tool_uses.append(block)
 
             spoken_text = " ".join(text_parts).strip()
 
             if not tool_uses:
                 spoken_text = self._extract_personality_update(spoken_text)
-                # Save history with tool summary so future turns know what happened
                 assistant_record = spoken_text
                 if tool_summaries:
                     assistant_record = (
@@ -462,27 +617,51 @@ class MopsLLM:
                 self.history.append({"user": user_text, "assistant": assistant_record})
                 return spoken_text
 
-            # Append the full assistant response to messages
-            messages.append({"role": "assistant", "content": response["content"]})
+            # Append the assistant response (serialize SDK blocks to minimal
+            # input-accepted dicts — see `_block_to_input_dict`).
+            messages.append({
+                "role": "assistant",
+                "content": [_block_to_input_dict(b) for b in final.content],
+            })
 
-            # Execute tools and build tool_result message
+            # PACING GATE — wait for the narration of this iteration to
+            # finish playing before we fire the tools it described. Keeps
+            # voice ahead of action. No-op on the first response if the
+            # speech queue is already empty.
+            if wait_for_speech is not None:
+                gate_t0 = time.monotonic()
+                drained = await wait_for_speech()
+                gate_wait = time.monotonic() - gate_t0
+                if gate_wait > 0.05:
+                    log.info("pacing gate: waited %.2fs for speech (drained=%s)", gate_wait, drained)
+
+            # Execute tool_use blocks concurrently. Claude decides what to
+            # parallelize — the cutting workflow prompt keeps write ops
+            # serial; status/info queries often arrive as a parallel batch.
+            # `gather` preserves argument order, so we can still report
+            # callbacks and build tool_results in emission order.
+            if len(tool_uses) > 1:
+                log.info(
+                    "executing %d tools in parallel: %s",
+                    len(tool_uses),
+                    [tu.name for tu in tool_uses],
+                )
+            results = await asyncio.gather(*(
+                self._execute_tool(tu.name, tu.input or {}) for tu in tool_uses
+            ))
+
             tool_results = []
-            for tu in tool_uses:
-                name = tu["name"]
-                input_data = tu.get("input", {})
-                result = await self._execute_tool(name, input_data)
-
+            for tu, result in zip(tool_uses, results):
                 if on_tool_call:
                     summary = result[:80] + "..." if len(result) > 80 else result
-                    on_tool_call(name, summary)
+                    on_tool_call(tu.name, summary)
 
-                # Track for history
                 short = result[:60] + "..." if len(result) > 60 else result
-                tool_summaries.append(f"{name} → {short}")
+                tool_summaries.append(f"{tu.name} → {short}")
 
                 tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": tu["id"],
+                    "tool_use_id": tu.id,
                     "content": result,
                 })
 
@@ -490,11 +669,45 @@ class MopsLLM:
 
         return "I ran too many tools there, Fran. Let me try again."
 
-    async def chat(self, user_text: str, on_tool_call=None) -> str:
-        """Send user text, execute tool calls, return final spoken response."""
-        if self.config.get("llm_engine") == "api":
-            return await self._chat_api(user_text, on_tool_call)
-        return await self._chat_cli(user_text, on_tool_call)
+    async def chat(
+        self,
+        user_text: str,
+        on_tool_call=None,
+        on_text_chunk=None,
+        wait_for_speech=None,
+    ) -> str:
+        """Send user text, execute tool calls, return final spoken response.
+
+        `on_text_chunk(delta: str)` — optional, fires with text deltas as the
+        assistant response streams in (API engine only). For the CLI engine,
+        non-streaming, the full response is forwarded as one chunk at the end.
+
+        `wait_for_speech() -> awaitable` — optional pacing gate. If provided,
+        it's awaited in the tool loop right after a streaming response with
+        tool_use blocks and before those tools execute. This keeps voice
+        ahead of action: the user hears the narration that describes a tool
+        call before the call actually fires.
+        """
+        engine = self.config.get("llm_engine")
+        log.info("chat start [engine=%s]: %r", engine, user_text)
+        t0 = time.monotonic()
+        try:
+            if engine == "api":
+                resp = await self._chat_api(
+                    user_text, on_tool_call, on_text_chunk, wait_for_speech,
+                )
+            else:
+                resp = await self._chat_cli(user_text, on_tool_call)
+                if on_text_chunk and resp:
+                    try:
+                        on_text_chunk(resp)
+                    except Exception:
+                        log.exception("on_text_chunk raised (CLI path)")
+            log.info("chat done %.2fs: %r", time.monotonic() - t0, resp)
+            return resp
+        except Exception:
+            log.exception("chat failed after %.2fs", time.monotonic() - t0)
+            raise
 
     async def _chat_cli(self, user_text: str, on_tool_call=None) -> str:
         """Chat via Claude CLI (original path)."""

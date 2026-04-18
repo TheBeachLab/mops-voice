@@ -12,6 +12,7 @@ dependencies = [
     "pynput>=1.8",
     "rich>=13.0",
     "numpy>=2.0",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]
