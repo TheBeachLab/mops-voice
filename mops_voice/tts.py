@@ -109,7 +109,8 @@ class VoxtralSynthesizer:
     }
 
     def __init__(self, api_key: str, voice: str = "en_paul_confident",
-                 ref_audio_path: Path | None = None):
+                 ref_audio_path: Path | None = None,
+                 config: dict | None = None):
         import soundfile  # noqa: F401 — verify available at init time
 
         if not api_key:
@@ -119,6 +120,7 @@ class VoxtralSynthesizer:
             )
         self._api_key = api_key
         self._voice = voice
+        self._config = config  # used for live voice lookup; voice arg is fallback
         self._url = "https://api.mistral.ai/v1/audio/speech"
 
         # Load reference audio for voice cloning (if voice is "tars" or a .wav path)
@@ -127,6 +129,13 @@ class VoxtralSynthesizer:
             self._ref_audio_b64 = base64.b64encode(
                 ref_audio_path.read_bytes()
             ).decode()
+
+    @property
+    def voice(self) -> str:
+        """Live voice id — re-read from config so /set_voxtral_voice takes effect."""
+        if self._config is not None:
+            return (self._config.get("voxtral") or {}).get("voice") or self._voice
+        return self._voice
 
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         """Synthesize text via Voxtral API. Returns (audio_array, sample_rate)."""
@@ -141,7 +150,7 @@ class VoxtralSynthesizer:
         if self._ref_audio_b64:
             body["ref_audio"] = self._ref_audio_b64
         else:
-            body["voice_id"] = self._voice
+            body["voice_id"] = self.voice
 
         payload = json.dumps(body).encode()
 
@@ -156,7 +165,7 @@ class VoxtralSynthesizer:
 
         log.debug(
             "voxtral synth → voice=%s chars=%d ref_clone=%s",
-            self._voice, len(text), bool(self._ref_audio_b64),
+            self.voice, len(text), bool(self._ref_audio_b64),
         )
         t0 = time.monotonic()
         try:
@@ -198,6 +207,7 @@ def create_synthesizer(config: dict) -> F5Synthesizer | VoxtralSynthesizer:
 
         return VoxtralSynthesizer(
             api_key=api_key, voice=voice, ref_audio_path=ref_audio_path,
+            config=config,
         )
 
     # Default: F5-TTS

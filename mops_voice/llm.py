@@ -15,6 +15,13 @@ from mops_voice.personality import (
     adjust_personality,
     get_personality,
 )
+from mops_voice.runtime_settings import (
+    get_voice_settings,
+    runtime_settings_tool_schemas,
+    set_image_roast,
+    set_llm_engine,
+    set_voxtral_voice,
+)
 from mops_voice.logging_setup import mcp_stderr_file, redact
 from mops_voice.image_attach import maybe_build_attachment
 
@@ -58,6 +65,7 @@ CRITICAL RULES:
 - Never format responses as documentation or instructions.
 - Talk like a human, not a manual.
 - If a tool_result contains an attached image, you have just glimpsed the file the user is about to cut/mill/print. Make ONE short, in-character quip about what you see (one sentence, under 12 words) before continuing the workflow. Examples: "Oh great, another logo." / "Bold choice, Fran." / "Whoever drew this should be ashamed." Skip the quip if the image is empty/unreadable. Never describe the image clinically; this is a roast, not narration.
+- The user can ask you mid-session to switch the Voxtral voice (set_voxtral_voice), change the image-roast probability (set_image_roast), or switch the LLM engine between cli/api (set_llm_engine). When they say things like "be sarcastic" or "use the angry voice", call set_voxtral_voice with the matching voice id. When they say "roast more" / "roast less" / "stop roasting", adjust set_image_roast (full off=0, occasional=0.3, every cut=1). API keys are NOT changeable via voice — if asked, tell them to edit ~/.mops-voice/config.json.
 
 You control fabrication machines through MOPS tools.
 - Pay close attention to what the user says. If they mention a filename, use it immediately. Do not ask for info they already gave you.
@@ -375,6 +383,25 @@ class MopsLLM:
             out = json.dumps(get_personality(self.config))
             log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
             return out
+        if name == "set_voxtral_voice":
+            result = set_voxtral_voice(self.config, self.config_path, input_data.get("voice", ""))
+            out = json.dumps(result) if isinstance(result, dict) else result
+            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
+            return out
+        if name == "set_image_roast":
+            result = set_image_roast(self.config, self.config_path, input_data.get("probability", 0))
+            out = json.dumps(result) if isinstance(result, dict) else result
+            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
+            return out
+        if name == "set_llm_engine":
+            result = set_llm_engine(self.config, self.config_path, input_data.get("engine", ""))
+            out = json.dumps(result) if isinstance(result, dict) else result
+            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
+            return out
+        if name == "get_voice_settings":
+            out = json.dumps(get_voice_settings(self.config))
+            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
+            return out
 
         # Execute via MCP
         if not self._mcp_session:
@@ -503,6 +530,7 @@ class MopsLLM:
             "description": "Get current personality settings",
             "input_schema": {"type": "object", "properties": {}},
         })
+        tools.extend(runtime_settings_tool_schemas())
         return tools
 
     def _history_to_api_messages(self) -> list[dict]:
