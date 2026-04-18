@@ -42,7 +42,7 @@ Get an API key at [console.anthropic.com](https://console.anthropic.com). Pay-pe
 
 ### TTS engine setup
 
-**F5-TTS (local, default)** — voice cloning via MLX, runs on Apple Silicon:
+**F5-TTS (local, default on Apple Silicon)** — voice cloning via MLX. Skip this section on Linux/Windows/Intel Mac: the dependency is auto-skipped at install time and `voxtral` is selected as the default instead.
 
 ```bash
 # Place reference audio and transcript
@@ -79,8 +79,9 @@ Hold **spacebar** to talk. **Ctrl+C** to exit.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--llm-engine` | cli | LLM engine: `cli` (Claude Code CLI) or `api` (direct Anthropic API) |
-| `--tts-engine` | f5 | TTS engine: `f5` (local MLX) or `voxtral` (Mistral API) |
+| `--tts-engine` | f5 on Apple Silicon, else voxtral | TTS engine: `f5` (local MLX) or `voxtral` (Mistral API) |
 | `--whisper-model NAME` | base.en | Whisper model |
+| `--user NAME` | Fran | User name shown in greetings |
 | `--mods-url URL` | mods.beachlab.org | Mods CE deployment |
 | `--headless` | off | Hide browser window |
 
@@ -95,7 +96,7 @@ Settings persist in `~/.mops-voice/config.json`.
 
 ## Requirements
 
-- macOS with Apple Silicon (M1/M2/M3)
+- macOS on Apple Silicon (M1/M2/M3) for the full local stack, or any Linux/Intel host with the Voxtral TTS engine (`tts_engine: voxtral` + Mistral API key). F5-TTS is Apple Silicon only.
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (for CLI engine) or Anthropic API key (for API engine)
 - Node.js (for MOPS MCP server)
 - [MOPS](../mops) MCP server in sibling directory
