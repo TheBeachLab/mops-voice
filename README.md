@@ -82,7 +82,7 @@ Hold **spacebar** to talk. **Ctrl+C** to exit.
 | `--tts-engine` | f5 on Apple Silicon, else voxtral | TTS engine: `f5` (local MLX) or `voxtral` (Mistral API) |
 | `--whisper-model NAME` | base.en | Whisper model |
 | `--user NAME` | Fran | User name shown in greetings |
-| `--mods-url URL` | mods.beachlab.org | Mods CE deployment |
+| `--mods-url URL` | modsproject.org | Mods CE deployment |
 | `--headless` | off | Hide browser window |
 
 ### Personality
