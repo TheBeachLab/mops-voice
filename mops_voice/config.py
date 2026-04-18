@@ -22,7 +22,7 @@ DEFAULT_CONFIG = {
         "sarcasm": 50,
         "honesty": 90,
     },
-    "mops_server_path": "../mops/src/server.js",
+    "mops_server_command": "npx -y @thebeachlab/mops",
     "whisper_model": "base.en",
     "llm_engine": "cli",
     "claude_model": "sonnet",

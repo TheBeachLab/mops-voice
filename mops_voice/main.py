@@ -5,6 +5,7 @@ import asyncio
 import os
 import queue
 import re
+import shlex
 import sys
 import threading
 import time
@@ -55,6 +56,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="User name (e.g. --user Fran)",
     )
     return parser.parse_args(argv)
+
+
+def _resolve_mcp_command(config: dict) -> tuple[str | None, list[str]]:
+    """Decide how to launch the mops MCP server.
+
+    Prefers `mops_server_command` (a shell-style command string, e.g.
+    "npx -y @thebeachlab/mops"). Falls back to legacy `mops_server_path`
+    (a path to a JS file, run with `node`).
+    Returns (command, args) or (None, []) if neither is set / valid.
+    """
+    cmd_str = config.get("mops_server_command")
+    if cmd_str:
+        parts = shlex.split(cmd_str)
+        if parts:
+            return parts[0], parts[1:]
+    server_path = config.get("mops_server_path")
+    if server_path:
+        if not Path(server_path).is_absolute():
+            server_path = str((Path(__file__).parent.parent / server_path).resolve())
+        if Path(server_path).exists():
+            return "node", [server_path]
+    return None, []
 
 
 async def run(argv: list[str] | None = None):
@@ -154,21 +177,19 @@ async def run(argv: list[str] | None = None):
     if args.mods_url:
         mcp_args.extend(["--mods-url", args.mods_url])
 
-    server_path = config["mops_server_path"]
-    if not Path(server_path).is_absolute():
-        server_path = str((Path(__file__).parent.parent / server_path).resolve())
+    mcp_command, mcp_base_args = _resolve_mcp_command(config)
 
     console.print("🤖 Connecting to MOPS MCP server...", end=" ")
-    if Path(server_path).exists():
-        mcp_ok = await llm.connect_mcp(server_path, mcp_args)
+    if mcp_command is None:
+        console.print("[yellow]WARN: no mops_server_command or mops_server_path configured[/yellow]")
+        console.print("[yellow]   Conversation-only mode (no machine control)[/yellow]")
+    else:
+        mcp_ok = await llm.connect_mcp(mcp_command, mcp_base_args + mcp_args)
         if mcp_ok:
             console.print(f"[green]OK ({len(llm._mcp_tools)} tools)[/green]")
         else:
             console.print("[yellow]WARN: Could not connect[/yellow]")
             console.print("[yellow]   Conversation-only mode (no machine control)[/yellow]")
-    else:
-        console.print(f"[yellow]WARN: Server not found at {server_path}[/yellow]")
-        console.print("[yellow]   Conversation-only mode (no machine control)[/yellow]")
 
     console.print()
     console.print("[bold]SPACEBAR = talk  |  ESC = cancel  |  Q = quit[/bold]")

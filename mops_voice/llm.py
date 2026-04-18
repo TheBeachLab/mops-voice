@@ -262,15 +262,15 @@ class MopsLLM:
         """Check if the claude CLI is available."""
         return shutil.which("claude") is not None
 
-    async def connect_mcp(self, server_path: str, extra_args: list[str] | None = None) -> bool:
+    async def connect_mcp(self, command: str, args: list[str] | None = None) -> bool:
         """Start persistent MCP connection to MOPS server. Returns True on success."""
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
 
-            args = [server_path] + (extra_args or [])
-            log.info("connecting MCP: node %s", " ".join(args))
-            server_params = StdioServerParameters(command="node", args=args)
+            args = list(args or [])
+            log.info("connecting MCP: %s %s", command, " ".join(args))
+            server_params = StdioServerParameters(command=command, args=args)
 
             # Route the MCP subprocess's stderr into our log file so every
             # [mops] line from server.js/browser.js is captured alongside

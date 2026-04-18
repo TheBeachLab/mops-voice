@@ -8,7 +8,7 @@ def test_default_config_has_required_keys():
     assert "assistant_name" in DEFAULT_CONFIG
     assert "user_name" in DEFAULT_CONFIG
     assert "personality" in DEFAULT_CONFIG
-    assert "mops_server_path" in DEFAULT_CONFIG
+    assert "mops_server_command" in DEFAULT_CONFIG
     assert "whisper_model" in DEFAULT_CONFIG
     assert "claude_model" in DEFAULT_CONFIG
 
