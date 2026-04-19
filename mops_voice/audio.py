@@ -49,14 +49,20 @@ def record_until_release(stop_event) -> np.ndarray | None:
 def play_audio(audio_data: np.ndarray, sample_rate: int = 24000) -> None:
     """Play audio through speakers. Blocks until complete.
 
-    Applies a short linear fade-out so the waveform doesn't end on a
-    non-zero sample — otherwise the speaker snaps back to zero and you
-    hear a click/pop at the end of every utterance.
+    The audible click at the end of each utterance comes from CoreAudio
+    closing the output stream while the driver still has non-zero state,
+    not from the waveform itself (Voxtral output ends at near-zero).
+    Remedy: pad with ~100ms of trailing silence so the stream closes on
+    a cold buffer. Still applies a 15ms fade-out as belt-and-suspenders
+    for engines that don't end on zero.
     """
-    fade_samples = min(int(sample_rate * 0.015), len(audio_data))  # 15ms
-    if fade_samples > 1 and np.issubdtype(audio_data.dtype, np.floating):
+    if np.issubdtype(audio_data.dtype, np.floating):
         audio_data = audio_data.copy()
-        fade = np.linspace(1.0, 0.0, fade_samples, dtype=audio_data.dtype)
-        audio_data[-fade_samples:] *= fade
+        fade_samples = min(int(sample_rate * 0.015), len(audio_data))  # 15ms
+        if fade_samples > 1:
+            fade = np.linspace(1.0, 0.0, fade_samples, dtype=audio_data.dtype)
+            audio_data[-fade_samples:] *= fade
+        silence = np.zeros(int(sample_rate * 0.1), dtype=audio_data.dtype)  # 100ms
+        audio_data = np.concatenate([audio_data, silence])
     sd.play(audio_data, samplerate=sample_rate)
     sd.wait()
