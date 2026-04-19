@@ -86,15 +86,24 @@ async def run(argv: list[str] | None = None):
     config = load_config()
     config_path = CONFIG_DIR / "config.json"
 
-    # Override config from CLI args
+    # Override config from CLI args. Persistent flags (engine choices,
+    # whisper model, user name) also get saved so the next run defaults
+    # to whatever you last used — no need to retype --llm-engine api
+    # every session. Session-only flags (--mods-url, --headless) are
+    # deliberately not persisted.
+    persist = False
     if args.whisper_model:
-        config["whisper_model"] = args.whisper_model
+        config["whisper_model"] = args.whisper_model; persist = True
     if args.tts_engine:
-        config["tts_engine"] = args.tts_engine
+        config["tts_engine"] = args.tts_engine; persist = True
     if args.llm_engine:
-        config["llm_engine"] = args.llm_engine
+        config["llm_engine"] = args.llm_engine; persist = True
     if args.user:
-        config["user_name"] = args.user
+        config["user_name"] = args.user; persist = True
+    if persist:
+        from mops_voice.config import save_config
+        save_config(config_path, config)
+        log.info("saved CLI overrides to %s", config_path)
 
     log.info(
         "startup: engine=%s model=%s tts=%s whisper=%s user=%s headless=%s mods_url=%s",
