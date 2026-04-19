@@ -477,3 +477,8 @@ async def run(argv: list[str] | None = None):
         await llm.disconnect_mcp()
         log.info("session end — log at %s", log_file)
         console.print("[bold cyan]MOPS out.[/bold cyan]")
+
+
+def main():
+    """Console-script entry point. Wraps the async run() in asyncio.run."""
+    asyncio.run(run())

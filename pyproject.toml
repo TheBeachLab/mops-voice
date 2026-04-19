@@ -16,6 +16,9 @@ dependencies = [
     "pillow>=10.0",
 ]
 
+[project.scripts]
+mops-voice = "mops_voice.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

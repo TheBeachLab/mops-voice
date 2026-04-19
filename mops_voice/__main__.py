@@ -1,12 +1,7 @@
-"""Entry point for python -m mops_voice."""
+"""Entry point for `python -m mops_voice`. The console-script entry
+point `mops-voice` (registered in pyproject.toml) calls the same main."""
 
-import asyncio
-from mops_voice.main import run
-
-
-def main():
-    asyncio.run(run())
-
+from mops_voice.main import main
 
 if __name__ == "__main__":
     main()
