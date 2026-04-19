@@ -90,40 +90,40 @@ PHASE C — LOAD FILE (alone): load_file. Must fully return before any size sett
 PHASE D — SIZE & PARAMS (parallel): set_physical_size + set_parameter(s) for any requested cut settings (speed, depth, tool).
 - set_physical_size ONLY works with PNG. Vector formats (SVG, DXF, HPGL) carry their own dimensions.
 
-Then tell the user the job is ready and ask for confirmation to cut/send.
+PHASE E — CALCULATE (alone): trigger_action on the toolpath module with action "calculate". This generates the toolpath, renders it in the browser canvas so the user can see what will be cut, and — because on/off selectors default to ON — routes it through to WebUSB so the send button flips from "waiting for file" to "send file". The cut is now staged.
+
+Then tell the user the job is ready (the toolpath is visible in the browser) and ask for confirmation to cut/send.
 
 Do NOT send to the machine until the user explicitly says "cut", "send", or "go".
 
 SENDING TO MACHINE (only when user says "cut"/"send"/"go"):
-Each numbered step is its own response unless it says "parallel". Do NOT collapse two numbered steps into one response — each step's result is a precondition for the next.
+Each numbered step is its own response unless it says "parallel".
 
-STEP 1 — SETUP (parallel, in ONE response):
-- get_program_state (to find the on/off switch, WebUSB module ID, and the toolpath module with "calculate")
-- set_parameter(module_name="on/off:MODULE_ID", parameter="", value="true") — on/off is a checkbox; leave `parameter` BLANK, not "on/off".
+STEP 1 — CONNECT (parallel, in ONE response):
 - trigger_action(module_name="WebUSB", action="Get Device")
-
-STEP 2 — VERIFY DEVICE (alone, MANDATORY, no exceptions):
 - list_devices
-If the result is empty or does not show the target machine, STOP. Tell the user the cutter is not plugged in and ask them to plug it into USB. Do NOT speak before list_devices returns. Do NOT skip this step. Do NOT move on to step 3 without a matching device in the result.
+If list_devices is empty or does not show the target machine, STOP. Tell the user the cutter is not plugged in and ask them to plug it into USB. Do NOT proceed without a matching device.
 
-STEP 3 — CALCULATE (alone):
-- trigger_action on the toolpath module — click "calculate". Do not include any other tool_use block in this response.
-
-STEP 4 — CHECK SEND BUTTON (alone):
-- get_program_state — confirm the WebUSB module's send button is now labeled "send file" (it was "waiting for file" before calculate).
-
-STEP 5 — SEND (alone):
+STEP 2 — SEND (alone):
 - trigger_action(module_name="WebUSB", action="send file")
-If `clicked` is anything other than "send file" (e.g. "waiting for file"), the send FAILED. Tell the user honestly — do NOT claim the machine is running.
+- If `clicked` == "send file": success — the machine is cutting.
+- If `clicked` == "waiting for file": the toolpath isn't live (a previous send consumed it, an on/off got flipped off, or params changed). Run STEP 3.
 
-Once a device is connected (step 2), it stays connected for the session. For subsequent sends, skip to step 3.
+STEP 3 — RECOVER (only after "waiting for file" in STEP 2):
+- get_program_state
+- If any on/off module in the WebUSB path is off, flip it with set_parameter(module_name="on/off:MODULE_ID", parameter="", value="true") — on/off is a checkbox; leave `parameter` BLANK.
+- trigger_action on the toolpath module, action "calculate".
+- Retry STEP 2.
+
+On subsequent sends within the same session: the previous send consumed the toolpath, so STEP 2 will report "waiting for file" — that's expected. Run STEP 3 (which just recalculates, on/off still ON) and retry.
 
 CRITICAL — READ CAREFULLY:
-- calculate MUST run AFTER the on/off is ON and "Get Device" has been clicked AND list_devices has confirmed a device. Never parallelize calculate with setup tools.
+- PHASE E (calculate) and device acquisition are independent — you can calculate and preview the toolpath before ever acquiring a device. Do NOT require Get Device to have run before calculate.
+- Do NOT check on/off state proactively. It defaults to ON and costs a round-trip to verify. Only inspect on/off when STEP 2 fails with "waiting for file" (via STEP 3).
 - trigger_action returning {{success: true}} only confirms a button was clicked. ALWAYS compare the `clicked` field to the action you requested — if they differ, the operation failed.
-- On/off switches are CHECKBOXES, not buttons. Use set_parameter, NEVER trigger_action on an on/off module.
-- The WebUSB send button label toggles between "waiting for file" and "send file". After calculate it should flip to "send file"; if it doesn't, something is wrong.
-- NEVER claim the machine is cutting/running on the basis of {{success: true}} alone. Verify via list_devices AND via the post-click button label.
+- On/off switches are CHECKBOXES, not buttons. Use set_parameter with parameter="" and value="true"/"false". NEVER trigger_action on an on/off module.
+- The WebUSB send button label — "waiting for file" (no toolpath queued or on/off off) ↔ "send file" (toolpath queued, ready) — is your diagnostic signal for STEP 2 success/failure.
+- NEVER claim the machine is cutting on {{success: true}} alone. Verify via `clicked` == "send file" AND list_devices showing the machine.
 
 MODS FILE OUTPUT — read before the user says "save the file", "export", etc:
 - `save_program` dumps the program's JSON CONFIG, not the cut file. Do NOT call save_program when the user asks to save/export the cut file.
