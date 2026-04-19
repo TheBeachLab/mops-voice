@@ -68,11 +68,20 @@ Available voices: `en_paul_neutral`, `en_paul_confident`, `en_paul_happy`, `en_p
 
 ## Usage
 
+From inside the repo:
+
 ```bash
-uv run python -m mops_voice
+uv run mops-voice
 ```
 
-Hold **spacebar** to talk. **Ctrl+C** to exit.
+Or install globally once, then call from anywhere:
+
+```bash
+uv tool install /path/to/mops-voice
+mops-voice
+```
+
+Hold **spacebar** to talk. **Q** or **Ctrl+C** to exit.
 
 ### Options
 
@@ -85,14 +94,23 @@ Hold **spacebar** to talk. **Ctrl+C** to exit.
 | `--mods-url URL` | modsproject.org | Mods CE deployment |
 | `--headless` | off | Hide browser window |
 
-### Personality
+Flags that express a preference (`--llm-engine`, `--tts-engine`, `--whisper-model`, `--user`) get saved to `~/.mops-voice/config.json` on use, so the next run defaults to whatever you last picked:
 
-MOPS has adjustable personality dials (0-100):
-- **humor** (default 75) — "Set humor to 90"
-- **sarcasm** (default 50) — "Be less sarcastic"
-- **honesty** (default 90) — "What's your honesty level?"
+```bash
+mops-voice --llm-engine api --tts-engine voxtral   # sets the defaults
+mops-voice                                          # picks them up, no flags needed
+```
 
-Settings persist in `~/.mops-voice/config.json`.
+### Voice-controllable settings
+
+MOPS accepts natural-language config changes mid-session. Settings persist to `~/.mops-voice/config.json`.
+
+- **Personality dials** (0-100): *"Set humor to 90"*, *"Be less sarcastic"*, *"What's your honesty level?"* — dials are `humor`, `sarcasm`, `honesty`.
+- **Voxtral voice**: *"Use the angry voice"*, *"Be sarcastic"*, *"Switch to the British voice"* — swaps among the 10 Voxtral presets on the next spoken sentence.
+- **Image roast**: *"Roast every image"*, *"Stop roasting"*, *"Roast less often"* — controls how often MOPS quips about a loaded PNG before cutting it. Default is 30% of the time.
+- **LLM engine**: *"Switch to API engine"* — flips between Claude CLI and direct Anthropic API mid-session.
+
+API keys are deliberately NOT voice-changeable — edit `~/.mops-voice/config.json` to set those.
 
 ## Requirements
 
