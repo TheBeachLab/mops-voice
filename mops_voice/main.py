@@ -274,12 +274,17 @@ async def run(argv: list[str] | None = None):
     listener.daemon = True
     listener.start()
 
-    # Suppress spacebar from reaching terminal (raw mode)
-    import sys
+    # Suppress spacebar and 'q' from reaching terminal: cbreak for
+    # immediate delivery, then clear ECHO so the captured keys don't
+    # print. Without ECHO-off, held spacebars accumulate visible whitespace
+    # and the quit 'q' appears after exit.
     import tty
     import termios
     _old_term = termios.tcgetattr(sys.stdin)
     tty.setcbreak(sys.stdin.fileno())
+    _attrs = termios.tcgetattr(sys.stdin)
+    _attrs[3] &= ~(termios.ECHO | termios.ECHONL)  # lflag: kill echo
+    termios.tcsetattr(sys.stdin, termios.TCSANOW, _attrs)
 
     # --- Main loop ---
     try:
@@ -464,7 +469,10 @@ async def run(argv: list[str] | None = None):
         console.print("\n[bold]Shutting down...[/bold]")
         log.info("shutting down via KeyboardInterrupt")
     finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
+        # TCSAFLUSH (not TCSADRAIN) discards any stdin keystrokes that
+        # accumulated during the session — otherwise the final 'q' or
+        # queued spaces would dump into the shell prompt after exit.
+        termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, _old_term)
         listener.stop()
         await llm.disconnect_mcp()
         log.info("session end — log at %s", log_file)
