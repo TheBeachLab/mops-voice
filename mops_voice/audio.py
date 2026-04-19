@@ -47,6 +47,16 @@ def record_until_release(stop_event) -> np.ndarray | None:
 
 
 def play_audio(audio_data: np.ndarray, sample_rate: int = 24000) -> None:
-    """Play audio through speakers. Blocks until complete."""
+    """Play audio through speakers. Blocks until complete.
+
+    Applies a short linear fade-out so the waveform doesn't end on a
+    non-zero sample — otherwise the speaker snaps back to zero and you
+    hear a click/pop at the end of every utterance.
+    """
+    fade_samples = min(int(sample_rate * 0.015), len(audio_data))  # 15ms
+    if fade_samples > 1 and np.issubdtype(audio_data.dtype, np.floating):
+        audio_data = audio_data.copy()
+        fade = np.linspace(1.0, 0.0, fade_samples, dtype=audio_data.dtype)
+        audio_data[-fade_samples:] *= fade
     sd.play(audio_data, samplerate=sample_rate)
     sd.wait()
