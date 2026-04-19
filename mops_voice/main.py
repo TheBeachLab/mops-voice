@@ -16,7 +16,7 @@ _SENTENCE_BOUNDARY = re.compile(r"[.!?](\s|$)")
 from rich.console import Console
 
 from mops_voice.config import load_config, CONFIG_DIR
-from mops_voice.audio import record_until_release, play_audio, audio_to_wav_bytes
+from mops_voice.audio import record_until_release, play_audio, audio_to_wav_bytes, close_output_stream
 from mops_voice.transcribe import Transcriber, is_gibberish
 from mops_voice.tts import create_synthesizer
 from mops_voice.llm import MopsLLM
@@ -483,6 +483,7 @@ async def run(argv: list[str] | None = None):
         # queued spaces would dump into the shell prompt after exit.
         termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, _old_term)
         listener.stop()
+        close_output_stream()
         await llm.disconnect_mcp()
         log.info("session end — log at %s", log_file)
         console.print("[bold cyan]MOPS out.[/bold cyan]")
