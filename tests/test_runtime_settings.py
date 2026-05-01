@@ -70,18 +70,22 @@ def test_set_image_roast_rejects_out_of_range(cfg):
     assert config["image_roast"]["probability"] == 0.3
 
 
-def test_set_llm_engine_accepts_cli_and_api(cfg):
+def test_set_llm_engine_accepts_cli_api_and_openai(cfg):
     config, path = cfg
     out = set_llm_engine(config, path, "cli")
     assert config["llm_engine"] == "cli"
     assert isinstance(out, dict)
     out = set_llm_engine(config, path, "api")
     assert config["llm_engine"] == "api"
+    config["openai"] = {"api_key": "sk-openai-test"}
+    out = set_llm_engine(config, path, "openai")
+    assert config["llm_engine"] == "openai"
+    assert isinstance(out, dict)
 
 
 def test_set_llm_engine_rejects_unknown(cfg):
     config, path = cfg
-    out = set_llm_engine(config, path, "openai")
+    out = set_llm_engine(config, path, "gemini")
     assert isinstance(out, str)
     assert config["llm_engine"] == "api"
 
@@ -95,3 +99,20 @@ def test_set_llm_engine_to_api_requires_key(cfg):
     # And cli works fine without an Anthropic key
     out = set_llm_engine(config, path, "cli")
     assert config["llm_engine"] == "cli"
+
+
+def test_set_llm_engine_to_openai_requires_key(cfg):
+    config, path = cfg
+    # No openai block at all → empty key path
+    out = set_llm_engine(config, path, "openai")
+    assert isinstance(out, str) and "key" in out.lower()
+    assert config["llm_engine"] == "api"
+    # Empty key string also rejected
+    config["openai"] = {"api_key": ""}
+    out = set_llm_engine(config, path, "openai")
+    assert isinstance(out, str) and "key" in out.lower()
+    # Valid key accepted
+    config["openai"]["api_key"] = "sk-openai-test"
+    out = set_llm_engine(config, path, "openai")
+    assert isinstance(out, dict)
+    assert config["llm_engine"] == "openai"

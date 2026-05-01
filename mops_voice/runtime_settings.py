@@ -27,7 +27,7 @@ VOXTRAL_VOICES = [
     "gb_jane_sarcasm",
 ]
 
-VALID_LLM_ENGINES = ("cli", "api")
+VALID_LLM_ENGINES = ("cli", "api", "openai")
 
 
 def set_voxtral_voice(config: dict, config_path: Path, voice: str) -> dict | str:
@@ -60,6 +60,13 @@ def set_llm_engine(config: dict, config_path: Path, engine: str) -> dict | str:
         if not key:
             return (
                 "Cannot switch to api engine: anthropic.api_key is empty. "
+                "Set it in ~/.mops-voice/config.json first."
+            )
+    if engine == "openai":
+        key = (config.get("openai") or {}).get("api_key", "")
+        if not key:
+            return (
+                "Cannot switch to openai engine: openai.api_key is empty. "
                 "Set it in ~/.mops-voice/config.json first."
             )
     config["llm_engine"] = engine
@@ -120,9 +127,10 @@ def runtime_settings_tool_schemas() -> list[dict]:
         {
             "name": "set_llm_engine",
             "description": (
-                "Switch the LLM engine between 'cli' (Claude Code CLI, slower "
-                "but no API key) and 'api' (direct Anthropic API, faster, "
-                "requires anthropic.api_key in config). Takes effect next turn."
+                "Switch the LLM engine. Options: 'cli' (Claude Code CLI, "
+                "slower but no API key), 'api' (direct Anthropic API, "
+                "faster, requires anthropic.api_key), 'openai' (direct "
+                "OpenAI API, requires openai.api_key). Takes effect next turn."
             ),
             "input_schema": {
                 "type": "object",
@@ -130,7 +138,7 @@ def runtime_settings_tool_schemas() -> list[dict]:
                     "engine": {
                         "type": "string",
                         "enum": list(VALID_LLM_ENGINES),
-                        "description": "'cli' or 'api'",
+                        "description": "'cli', 'api', or 'openai'",
                     },
                 },
                 "required": ["engine"],

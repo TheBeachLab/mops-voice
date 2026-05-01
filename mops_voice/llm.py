@@ -1,4 +1,4 @@
-"""LLM via Claude Code CLI or direct Anthropic API + persistent MCP for tools."""
+"""LLM via Claude Code CLI, direct Anthropic API, or direct OpenAI API + persistent MCP for tools."""
 
 import asyncio
 import json
@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import anthropic
+import openai
 
 from mops_voice.personality import (
     adjust_personality,
@@ -41,6 +42,14 @@ MODEL_ALIASES = {
     "opus": "claude-opus-4-5",
 }
 
+# OpenAI aliases — same idea as Anthropic. Default model is gpt-5-mini
+# (latency/cost analog of claude-haiku for voice turns).
+OPENAI_MODEL_ALIASES = {
+    "mini": "gpt-5-mini",
+    "nano": "gpt-5-nano",
+    "5": "gpt-5",
+}
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are {assistant_name}, a voice assistant for digital fabrication.
 You address the user as {user_name}.
@@ -67,7 +76,7 @@ CRITICAL RULES:
 - Never format responses as documentation or instructions.
 - Talk like a human, not a manual.
 - If a tool_result contains an attached image, you have just glimpsed the file the user is about to cut/mill/print. Make exactly ONE cutting, unmistakably sarcastic quip about what you ACTUALLY SEE in that specific image (one sentence, under 12 words). Go for the throat — deadpan, mock-awed, faux-praise, backhanded compliment, comparison to worse things — anything but polite. The quip MUST be improvised for this image; NEVER copy a sample verbatim or paraphrase one. Do not use the words "bold", "bold choice", or any phrasing you've used in a previous session. For tonal reference only (do NOT reuse): "Ambitious, for a Tuesday." / "This screams 'made in the car on the way here.'" / "Someone call MoMA." / "The machine deserves better." / "Riveting. Truly." / "I've seen more commitment in a doodle." / "Another triumph for beginner CAD." / "Can't wait to watch this struggle through the cutter." / "Oh great, another logo." / "Whoever drew this should be ashamed." Emit ONLY the quip — no second sentence riffing off it. Skip entirely if the image is empty/unreadable. Never narrate the image clinically.
-- The user can ask you mid-session to switch the Voxtral voice (set_voxtral_voice), change the image-roast probability (set_image_roast), or switch the LLM engine between cli/api (set_llm_engine). When they say things like "be sarcastic" or "use the angry voice", call set_voxtral_voice with the matching voice id. When they say "roast more" / "roast less" / "stop roasting", adjust set_image_roast (full off=0, occasional=0.3, every cut=1). API keys are NOT changeable via voice — if asked, tell them to edit ~/.mops-voice/config.json.
+- The user can ask you mid-session to switch the Voxtral voice (set_voxtral_voice), change the image-roast probability (set_image_roast), or switch the LLM engine between cli/api/openai (set_llm_engine). When they say things like "be sarcastic" or "use the angry voice", call set_voxtral_voice with the matching voice id. When they say "roast more" / "roast less" / "stop roasting", adjust set_image_roast (full off=0, occasional=0.3, every cut=1). API keys are NOT changeable via voice — if asked, tell them to edit ~/.mops-voice/config.json.
 
 You control fabrication machines through MOPS tools.
 - Pay close attention to what the user says. If they mention a filename, use it immediately. Do not ask for info they already gave you.
@@ -255,12 +264,19 @@ class MopsLLM:
         self._mcp_stderr_fh = None
         self._tool_descriptions = ""
         self._anthropic: anthropic.AsyncAnthropic | None = None
+        self._openai: openai.AsyncOpenAI | None = None
 
     def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:
         """Lazily construct the async Anthropic client."""
         if self._anthropic is None:
             self._anthropic = anthropic.AsyncAnthropic(api_key=self._get_api_key())
         return self._anthropic
+
+    def _get_openai_client(self) -> openai.AsyncOpenAI:
+        """Lazily construct the async OpenAI client."""
+        if self._openai is None:
+            self._openai = openai.AsyncOpenAI(api_key=self._get_openai_api_key())
+        return self._openai
 
     @staticmethod
     def check_cli() -> bool:
@@ -725,6 +741,303 @@ class MopsLLM:
 
         return "I ran too many tools there, Fran. Let me try again."
 
+    # --- Direct OpenAI API path ---
+
+    def _resolve_openai_model(self) -> str:
+        """Resolve openai model alias to full ID."""
+        model = (self.config.get("openai") or {}).get("model", "gpt-5-mini")
+        return OPENAI_MODEL_ALIASES.get(model, model)
+
+    def _get_openai_api_key(self) -> str:
+        """Get OpenAI API key from config or environment."""
+        api_cfg = self.config.get("openai") or {}
+        return api_cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+
+    def _build_openai_tools(self) -> list[dict]:
+        """Translate Anthropic-shaped tool list to OpenAI chat.completions shape."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+                },
+            }
+            for t in self._build_api_tools()
+        ]
+
+    def _history_to_openai_messages(self) -> list[dict]:
+        """Convert conversation history to OpenAI chat.completions message format."""
+        messages = []
+        for entry in self.history:
+            messages.append({"role": "user", "content": entry["user"]})
+            messages.append({"role": "assistant", "content": entry["assistant"]})
+        return messages
+
+    @staticmethod
+    def _anthropic_image_to_openai(image_block: dict) -> dict:
+        """Translate Anthropic image content block → OpenAI image_url block.
+
+        Anthropic shape: {"type": "image", "source": {"type": "base64",
+        "media_type": "image/png", "data": "..."}}
+        OpenAI shape: {"type": "image_url", "image_url": {"url":
+        "data:image/png;base64,..."}}
+        """
+        src = image_block.get("source") or {}
+        media = src.get("media_type", "image/png")
+        data = src.get("data", "")
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{media};base64,{data}"},
+        }
+
+    async def _stream_openai(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_text_chunk=None,
+    ) -> dict:
+        """Stream one OpenAI chat.completions call. Returns a dict with the
+        accumulated assistant message: {text, tool_calls, finish_reason}.
+
+        Forwards text deltas to `on_text_chunk` as they arrive. Tool-call
+        argument tokens are NOT streamed to TTS (same policy as Anthropic
+        path) — they accumulate by index in `tool_call_buffer`.
+        """
+        client = self._get_openai_client()
+        system_prompt = build_system_prompt(self.config, self._tool_descriptions)
+        model = self._resolve_openai_model()
+
+        kwargs = {
+            "model": model,
+            "max_completion_tokens": 600,
+            "messages": [{"role": "system", "content": system_prompt}, *messages],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = tools
+
+        log.debug(
+            "openai stream → model=%s msgs=%d tools=%d key=%s",
+            model, len(messages), len(tools or []),
+            redact(self._get_openai_api_key()),
+        )
+        log.debug("openai stream messages: %s", json.dumps(messages, default=str)[:1200])
+
+        t0 = time.monotonic()
+        text_parts: list[str] = []
+        # Tool-call deltas arrive in pieces; accumulate by `index`.
+        # Each entry: {"id": str, "name": str, "arguments": str}
+        tool_call_buffer: dict[int, dict] = {}
+        finish_reason: str | None = None
+        usage = None
+
+        stream = await client.chat.completions.create(**kwargs)
+        async for chunk in stream:
+            if chunk.choices:
+                choice = chunk.choices[0]
+                delta = choice.delta
+                content = getattr(delta, "content", None)
+                if content:
+                    text_parts.append(content)
+                    if on_text_chunk:
+                        try:
+                            on_text_chunk(content)
+                        except Exception:
+                            log.exception("on_text_chunk raised")
+                tcs = getattr(delta, "tool_calls", None) or []
+                for tcd in tcs:
+                    idx = tcd.index
+                    buf = tool_call_buffer.setdefault(
+                        idx, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if getattr(tcd, "id", None):
+                        buf["id"] = tcd.id
+                    fn = getattr(tcd, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            buf["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            buf["arguments"] += fn.arguments
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+
+        elapsed = time.monotonic() - t0
+        # OpenAI surfaces cache hits via `prompt_tokens_details.cached_tokens`
+        # since 2024-10. Caching is automatic for prompts >1024 tokens —
+        # there's no equivalent of Anthropic's `cache_control` markers.
+        cached = 0
+        prompt_toks = 0
+        completion_toks = 0
+        if usage:
+            prompt_toks = getattr(usage, "prompt_tokens", 0) or 0
+            completion_toks = getattr(usage, "completion_tokens", 0) or 0
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details is not None:
+                cached = getattr(details, "cached_tokens", 0) or 0
+        log.info(
+            "openai API ← %.2fs stop=%s prompt=%d cached=%d completion=%d",
+            elapsed, finish_reason, prompt_toks, cached, completion_toks,
+        )
+
+        tool_calls = [
+            tool_call_buffer[i] for i in sorted(tool_call_buffer.keys())
+        ]
+        return {
+            "text": "".join(text_parts),
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
+        }
+
+    async def _chat_openai(
+        self,
+        user_text: str,
+        on_tool_call=None,
+        on_text_chunk=None,
+        wait_for_speech=None,
+    ) -> str:
+        """Chat via direct OpenAI API with native tool_calls + streaming.
+
+        Mirror of `_chat_api` for OpenAI. Same multi-round tool loop, same
+        pacing-gate hook, same parallel tool execution, same image-attach
+        helper (translated to OpenAI's `image_url` shape).
+        """
+        self._prune_history()
+
+        messages = self._history_to_openai_messages()
+        messages.append({"role": "user", "content": user_text})
+
+        tools = self._build_openai_tools() if self._mcp_tools else None
+        tool_summaries = []
+
+        for _iteration in range(MAX_TOOL_LOOPS):
+            try:
+                final = await self._stream_openai(messages, tools, on_text_chunk)
+            except openai.APIError as e:
+                log.exception("openai API error, falling back to CLI")
+                fallback_prompt = (
+                    f"(System note: the OpenAI API call failed with: {e}. "
+                    f"Briefly tell Fran about this issue in a conversational way, "
+                    f"then try to answer their original question.)\n\n"
+                    f"Fran said: {user_text}"
+                )
+                return await self._chat_cli(fallback_prompt, on_tool_call)
+
+            spoken_text = (final["text"] or "").strip()
+            tool_calls = final["tool_calls"]
+
+            if not tool_calls:
+                spoken_text = self._extract_personality_update(spoken_text)
+                assistant_record = spoken_text
+                if tool_summaries:
+                    assistant_record = (
+                        "[Tools used: " + "; ".join(tool_summaries) + "] "
+                        + spoken_text
+                    )
+                self.history.append({"user": user_text, "assistant": assistant_record})
+                return spoken_text
+
+            # Echo the assistant message back into the conversation so the
+            # tool results have something to attach to. OpenAI requires the
+            # assistant message that issued tool_calls to appear before any
+            # `tool` role messages referring to those call ids.
+            messages.append({
+                "role": "assistant",
+                "content": final["text"] or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"] or "{}",
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            })
+
+            # PACING GATE — same as Anthropic path. Wait for narration to
+            # finish playing before firing the tools it described.
+            if wait_for_speech is not None:
+                gate_t0 = time.monotonic()
+                drained = await wait_for_speech()
+                gate_wait = time.monotonic() - gate_t0
+                if gate_wait > 0.05:
+                    log.info("pacing gate: waited %.2fs for speech (drained=%s)", gate_wait, drained)
+
+            # Decode each tool_call's JSON arguments. OpenAI streams them
+            # as a single concatenated string per call_id; a malformed
+            # arguments blob is treated as an error rather than crashing
+            # the loop.
+            decoded: list[tuple[dict, dict]] = []
+            for tc in tool_calls:
+                try:
+                    args = json.loads(tc["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                    log.warning(
+                        "openai tool_call %s: invalid JSON arguments %r",
+                        tc["name"], tc["arguments"][:200],
+                    )
+                decoded.append((tc, args))
+
+            if len(decoded) > 1:
+                log.info(
+                    "executing %d tools in parallel: %s",
+                    len(decoded), [tc["name"] for tc, _ in decoded],
+                )
+            results = await asyncio.gather(*(
+                self._execute_tool(tc["name"], args) for tc, args in decoded
+            ))
+
+            # OpenAI's `tool` role only accepts string content — image
+            # attachments ride along as a follow-up user message instead
+            # (mirrors the Anthropic image-on-tool-result feature).
+            image_followups: list[dict] = []
+            for (tc, args), (result, is_error) in zip(decoded, results):
+                if on_tool_call:
+                    summary = result[:80] + "..." if len(result) > 80 else result
+                    on_tool_call(tc["name"], summary)
+
+                short = result[:60] + "..." if len(result) > 60 else result
+                tool_summaries.append(f"{tc['name']} → {short}")
+
+                # Reuse the Anthropic-format helper, then translate any
+                # image block it produced into OpenAI's image_url shape.
+                attached = self._maybe_attach_image(
+                    type("ToolUse", (), {"name": tc["name"], "input": args, "id": tc["id"]})(),
+                    result, is_error,
+                )
+                if isinstance(attached, list):
+                    text_block = next((b for b in attached if b.get("type") == "text"), None)
+                    image_block = next((b for b in attached if b.get("type") == "image"), None)
+                    text_for_tool = (text_block or {}).get("text", result)
+                    if image_block:
+                        image_followups.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"(Preview from {tc['name']} — react in character.)"},
+                                self._anthropic_image_to_openai(image_block),
+                            ],
+                        })
+                else:
+                    text_for_tool = attached
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": text_for_tool,
+                })
+
+            messages.extend(image_followups)
+
+        return "I ran too many tools there, Fran. Let me try again."
+
     async def chat(
         self,
         user_text: str,
@@ -750,6 +1063,10 @@ class MopsLLM:
         try:
             if engine == "api":
                 resp = await self._chat_api(
+                    user_text, on_tool_call, on_text_chunk, wait_for_speech,
+                )
+            elif engine == "openai":
+                resp = await self._chat_openai(
                     user_text, on_tool_call, on_text_chunk, wait_for_speech,
                 )
             else:

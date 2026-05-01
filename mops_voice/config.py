@@ -29,6 +29,14 @@ DEFAULT_CONFIG = {
     "anthropic": {
         "api_key": "",
     },
+    "openai": {
+        "api_key": "",
+        # gpt-5-mini is the latency/cost analog of claude-haiku for voice
+        # turns. Override to "gpt-5-nano" for cheaper or "gpt-5" for max
+        # capability. Bare names + a few short aliases are accepted —
+        # date-suffixed variants can silently break on retirement.
+        "model": "gpt-5-mini",
+    },
     "tts_engine": _DEFAULT_TTS_ENGINE,
     "voxtral": {
         "api_key": "",

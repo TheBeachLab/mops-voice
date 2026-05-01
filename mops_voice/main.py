@@ -50,8 +50,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--llm-engine", type=str, default=None,
-        choices=["cli", "api"],
-        help="LLM engine: cli (Claude Code CLI) or api (direct Anthropic API)",
+        choices=["cli", "api", "openai"],
+        help="LLM engine: cli (Claude Code CLI), api (direct Anthropic API), or openai (direct OpenAI API)",
     )
     parser.add_argument(
         "--user", type=str, default=None,
@@ -142,8 +142,16 @@ async def run(argv: list[str] | None = None):
 
     console.print("[bold cyan]MOPS Voice Assistant[/bold cyan]")
     console.print(f"Assistant: {config['assistant_name']}  |  User: {config['user_name']}")
-    llm_label = "Anthropic API" if llm_engine == "api" else "Claude CLI"
-    console.print(f"LLM: {config['claude_model']} via {llm_label}")
+    if llm_engine == "openai":
+        llm_label = "OpenAI API"
+        model_display = config.get("openai", {}).get("model", "gpt-5-mini")
+    elif llm_engine == "api":
+        llm_label = "Anthropic API"
+        model_display = config["claude_model"]
+    else:
+        llm_label = "Claude CLI"
+        model_display = config["claude_model"]
+    console.print(f"LLM: {model_display} via {llm_label}")
     p = config["personality"]
     console.print(
         f"Personality: humor={p['humor']}% sarcasm={p['sarcasm']}% honesty={p['honesty']}%"
@@ -433,7 +441,11 @@ async def run(argv: list[str] | None = None):
             # Claude + tools
             cancel_event.clear()
             t0 = time.monotonic()
-            console.print(f"🤖 Calling Claude ({config['claude_model']})...")
+            if llm_engine == "openai":
+                _model_label = config.get("openai", {}).get("model", "gpt-5-mini")
+                console.print(f"🤖 Calling OpenAI ({_model_label})...")
+            else:
+                console.print(f"🤖 Calling Claude ({config['claude_model']})...")
 
             # Pipelined speech: a synth thread pulls sentences and produces
             # audio, a play thread pulls audio and plays it. With sequential
