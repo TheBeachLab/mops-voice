@@ -2,6 +2,10 @@
 
 Voice-controlled CLI assistant for digital fabrication. Talk to MOPS, control your machines.
 
+## Demo
+
+<video src="https://github.com/TheBeachLab/mops-voice/releases/download/demo/mops.mp4" controls width="720"></video>
+
 ## Pipeline
 
 ```
