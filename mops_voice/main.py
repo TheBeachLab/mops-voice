@@ -11,6 +11,8 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
+
 _SENTENCE_BOUNDARY = re.compile(r"[.!?](\s|$)")
 
 from rich.console import Console
@@ -208,9 +210,14 @@ async def run(argv: list[str] | None = None):
     loop = asyncio.get_running_loop()
     greeting = await llm.chat(
         f"(System: {config['user_name']} just started a session. "
-        f"Greet them with a short, personality-driven one-liner. "
-        f"Be creative — reference fabrication machines, past disasters, "
-        f"or tease them about what they might be up to today.)"
+        f"Greet them with a HIGH-ENERGY, excited one-liner — think "
+        f"punchy, exclamatory, hyped-up. MUST open with a salutation "
+        f"addressing them by name (e.g. 'Hey {config['user_name']}!', "
+        f"'Hello {config['user_name']}!', 'Welcome back, {config['user_name']}!'). "
+        f"Lead with the energy, not the sarcasm. One sentence, under "
+        f"15 words, ending with an exclamation mark. Reference "
+        f"fabrication machines, past disasters, or tease them about "
+        f"what they might be up to today.)"
     )
     console.print(f"🤖 [green]{greeting}[/green]")
     if synthesizer:
@@ -226,6 +233,40 @@ async def run(argv: list[str] | None = None):
     # --- Keyboard listener ---
     from pynput import keyboard
     import subprocess as _sp
+
+    def _resolve_key(name: str):
+        """Map a config key name to a pynput Key/KeyCode.
+
+        Single-char names (e.g. "b") become a `KeyCode`; multi-char names
+        (e.g. "page_down", "f5", "esc") resolve via `keyboard.Key.<name>`.
+        Returns None if the name doesn't match either form — caller should
+        treat that as "feature disabled" rather than crashing.
+        """
+        if not name:
+            return None
+        name = name.lower().strip()
+        if len(name) == 1:
+            return keyboard.KeyCode.from_char(name)
+        return getattr(keyboard.Key, name, None)
+
+    clicker_cfg = config.get("clicker") or {}
+    clicker_enabled = bool(clicker_cfg.get("enabled"))
+    clicker_trigger = _resolve_key(clicker_cfg.get("trigger_key", "")) if clicker_enabled else None
+    clicker_cancel = _resolve_key(clicker_cfg.get("cancel_key", "")) if clicker_enabled else None
+    clicker_mode = clicker_cfg.get("mode", "toggle")
+
+    if clicker_enabled:
+        log.info(
+            "clicker enabled: trigger=%s cancel=%s mode=%s",
+            clicker_cfg.get("trigger_key"), clicker_cfg.get("cancel_key"), clicker_mode,
+        )
+        controls = [
+            f"{clicker_cfg.get('trigger_key', '?').upper().replace('_', ' ')} = "
+            f"{'toggle' if clicker_mode == 'toggle' else 'hold to talk'}",
+        ]
+        if clicker_cancel is not None:
+            controls.append(f"{clicker_cfg.get('cancel_key', '?').upper()} = cancel")
+        console.print(f"📡 [bold]Clicker:[/bold] " + "  |  ".join(controls))
 
     recording = False
     stop_event = threading.Event()
@@ -253,6 +294,26 @@ async def run(argv: list[str] | None = None):
 
     def on_press(key):
         nonlocal recording, space_held
+        # Clicker keys: NO focus check — designed for when you're across
+        # the room. Trade-off: a stray Page Down (or whatever the trigger
+        # is) anywhere on the system will toggle a recording.
+        if clicker_enabled:
+            if clicker_trigger is not None and key == clicker_trigger:
+                if clicker_mode == "toggle":
+                    if not recording:
+                        recording = True
+                        stop_event.clear()
+                    else:
+                        recording = False
+                        stop_event.set()
+                else:  # "hold" — start on press, on_release will stop
+                    if not recording:
+                        recording = True
+                        stop_event.clear()
+                return
+            if clicker_cancel is not None and key == clicker_cancel:
+                cancel_event.set()
+                return
         # 'q' to quit cleanly
         if hasattr(key, 'char') and key.char == 'q' and not recording:
             if _terminal_is_focused():
@@ -273,6 +334,18 @@ async def run(argv: list[str] | None = None):
 
     def on_release(key):
         nonlocal recording, space_held
+        # Clicker hold-mode release stops the recording. Toggle mode
+        # ignores releases (the second click handles stop in on_press).
+        if (
+            clicker_enabled
+            and clicker_mode == "hold"
+            and clicker_trigger is not None
+            and key == clicker_trigger
+        ):
+            if recording:
+                recording = False
+                stop_event.set()
+            return
         if key == keyboard.Key.space:
             space_held = False
             if recording:
@@ -362,47 +435,84 @@ async def run(argv: list[str] | None = None):
             t0 = time.monotonic()
             console.print(f"🤖 Calling Claude ({config['claude_model']})...")
 
-            # Background speech queue for tool progress.
-            # task_done() is called on every popped item so `unfinished_tasks`
-            # reflects both "queued" and "currently playing". That's what the
-            # pacing gate (wait_for_speech) polls to sync voice and actions.
-            speech_queue: queue.Queue[str | None] = queue.Queue()
+            # Pipelined speech: a synth thread pulls sentences and produces
+            # audio, a play thread pulls audio and plays it. With sequential
+            # synth+play in one thread, sentence N+1's synth was blocked
+            # during sentence N's playback — leaving a ~1.5s silent gap per
+            # sentence on Voxtral. Splitting them lets synth(N+1) overlap
+            # with play(N), shrinking inter-sentence gaps to ~the difference
+            # between synth latency and playback duration.
+            sentence_queue: queue.Queue[str | None] = queue.Queue()
+            audio_queue: queue.Queue[tuple[np.ndarray, int] | None] = queue.Queue()
             speech_done = threading.Event()
 
-            def _speech_worker():
-                """Drain the speech queue, synthesizing and playing each phrase."""
+            def _synth_worker():
+                """Pull sentences, synthesize, push audio chunks downstream."""
                 while True:
-                    phrase = speech_queue.get()
+                    phrase = sentence_queue.get()
                     try:
                         if phrase is None:  # poison pill
+                            audio_queue.put(None)
                             break
                         if cancel_event.is_set():
                             continue
                         try:
                             audio, sr = synthesizer.synthesize(phrase)
                             if not cancel_event.is_set():
-                                play_audio(audio, sr)
+                                audio_queue.put((audio, sr))
                         except Exception:
                             pass
                     finally:
-                        speech_queue.task_done()
+                        sentence_queue.task_done()
+
+            def _play_worker():
+                """Pull audio chunks and play them, one after the next."""
+                while True:
+                    item = audio_queue.get()
+                    try:
+                        if item is None:  # poison pill from synth
+                            break
+                        if cancel_event.is_set():
+                            continue
+                        audio, sr = item
+                        try:
+                            play_audio(audio, sr)
+                        except Exception:
+                            pass
+                    finally:
+                        audio_queue.task_done()
                 speech_done.set()
 
             async def wait_for_speech(timeout: float = 30.0) -> bool:
-                """Block until the speech queue has fully drained (synth + playback).
+                """Block until both pipelines have fully drained.
 
                 Used as the voice-action pacing gate: _chat_api awaits this
                 after a response with tool_use blocks and before executing
                 those tools, so the user always hears the narration that
-                describes an action *before* the action fires.
+                describes an action *before* the action fires. With the
+                synth/play split we must wait on BOTH stages — sentence
+                still in the synth queue, or audio still queued/playing.
                 """
+                nonlocal sentence_buffer
                 if not synthesizer:
                     return True
+                # Flush any partial sentence the streamer didn't enqueue
+                # because it never saw a terminal `.!?`. Without this,
+                # narration like "opening browser" (no period) sits in the
+                # buffer while tools fire — voice-leads-action breaks and
+                # the user hears the line merged with the next iteration's.
+                tail = sentence_buffer.strip()
+                if tail:
+                    sentence_buffer = ""
+                    sentence_queue.put(tail)
                 start = time.monotonic()
                 while time.monotonic() - start < timeout:
                     if cancel_event.is_set():
                         return False
-                    if speech_queue.unfinished_tasks == 0:
+                    if (
+                        sentence_queue.unfinished_tasks == 0
+                        and audio_queue.unfinished_tasks == 0
+                    ):
                         return True
                     await asyncio.sleep(0.05)
                 return False
@@ -412,8 +522,10 @@ async def run(argv: list[str] | None = None):
             first_text_t: float | None = None
 
             if synthesizer:
-                speech_thread = threading.Thread(target=_speech_worker, daemon=True)
-                speech_thread.start()
+                synth_thread = threading.Thread(target=_synth_worker, daemon=True)
+                play_thread = threading.Thread(target=_play_worker, daemon=True)
+                synth_thread.start()
+                play_thread.start()
 
             def on_tool_call(name, summary):
                 console.print(f"  🔧 Tool call: {name} → {summary}")
@@ -436,7 +548,7 @@ async def run(argv: list[str] | None = None):
                     sentence_buffer = sentence_buffer[end:]
                     if sentence:
                         log.debug("enqueue sentence: %r", sentence)
-                        speech_queue.put(sentence)
+                        sentence_queue.put(sentence)
 
             try:
                 response_text = await llm.chat(
@@ -450,11 +562,14 @@ async def run(argv: list[str] | None = None):
                 raise
 
             if synthesizer:
-                # Push any trailing sentence that didn't end in punctuation.
+                # Push any trailing sentence that didn't end in punctuation,
+                # then a poison pill. The synth worker forwards the pill to
+                # audio_queue once it's drained, so play_worker exits cleanly
+                # only after every queued sentence has been synth'd + played.
                 tail = sentence_buffer.strip()
                 if tail:
-                    speech_queue.put(tail)
-                speech_queue.put(None)  # poison pill
+                    sentence_queue.put(tail)
+                sentence_queue.put(None)  # poison pill
 
             if cancel_event.is_set():
                 console.print("[yellow]Cancelled.[/yellow]")

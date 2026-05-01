@@ -83,6 +83,8 @@ mops-voice
 
 Hold **spacebar** to talk. **Q** or **Ctrl+C** to exit.
 
+**Bluetooth clicker (optional)** — a presentation remote like the Kensington 33062 can drive PTT from across the room. Defaults: **Page Down** toggles recording on/off, the lower **B** button cancels the current operation. Configure under `clicker` in `~/.mops-voice/config.json` (`enabled`, `trigger_key`, `cancel_key`, `mode: toggle|hold`). To map an unknown remote's buttons, run `uv run python scripts/clicker_test.py` and press each button to see the key name pynput reports.
+
 ### Options
 
 | Flag | Default | Description |

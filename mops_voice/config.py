@@ -38,6 +38,17 @@ DEFAULT_CONFIG = {
         "probability": 0.3,
         "max_dim": 512,
     },
+    # BT presentation clicker support (e.g. Kensington 33062). Toggle mode
+    # because clicker buttons aren't comfortable to hold across the room.
+    # Keys bypass `_terminal_is_focused()` so the clicker works when you're
+    # away from the keyboard — accept that a stray Page Down anywhere on
+    # the system will toggle a recording while clicker.enabled is true.
+    "clicker": {
+        "enabled": True,
+        "trigger_key": "page_down",
+        "cancel_key": "b",
+        "mode": "toggle",
+    },
 }
 
 

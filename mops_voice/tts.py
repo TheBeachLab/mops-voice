@@ -125,10 +125,24 @@ class VoxtralSynthesizer:
 
         # Load reference audio for voice cloning (if voice is "tars" or a .wav path)
         self._ref_audio_b64 = None
+        self._ref_transcript: str | None = None
         if ref_audio_path and ref_audio_path.exists():
             self._ref_audio_b64 = base64.b64encode(
                 ref_audio_path.read_bytes()
             ).decode()
+            # Load the matching transcript if one sits next to the WAV.
+            # Voxtral's zero-shot cloning hallucinates phonemes (esp. on
+            # proper names) when it has to infer the reference text from
+            # audio alone; pinning the words helps it focus on the *voice*.
+            transcript_path = ref_audio_path.with_suffix(".txt")
+            if transcript_path.exists():
+                self._ref_transcript = transcript_path.read_text(
+                    encoding="utf-8"
+                ).strip()
+                log.info(
+                    "loaded ref transcript (%d chars) from %s",
+                    len(self._ref_transcript), transcript_path,
+                )
 
     @property
     def voice(self) -> str:
@@ -149,6 +163,11 @@ class VoxtralSynthesizer:
 
         if self._ref_audio_b64:
             body["ref_audio"] = self._ref_audio_b64
+            # Voxtral API has no reference-transcript field (probed
+            # 2026-04-20 — every candidate name returned `extra_forbidden`,
+            # and `ref_audio` is a strict string, no nested object). Pure
+            # zero-shot cloning. The transcript file is loaded for our own
+            # records and for future engines.
         else:
             body["voice_id"] = self.voice
 
@@ -171,6 +190,21 @@ class VoxtralSynthesizer:
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 body = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            # Capture Mistral's actual error message — without this, observed
+            # 403s in the logs were unattributable (rate limit? auth? content?).
+            # Read once before re-raising so the response body shows up at
+            # ERROR level for diagnosis. No retry: a delayed retry would
+            # break the per-sentence pacing more than dropping the line.
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")[:500]
+            except Exception:
+                err_body = "<no body>"
+            log.error(
+                "voxtral synth HTTP %d after %.2fs (chars=%d, voice=%s): %s",
+                e.code, time.monotonic() - t0, len(text), self.voice, err_body,
+            )
+            raise
         except Exception:
             log.exception("voxtral synth failed after %.2fs", time.monotonic() - t0)
             raise

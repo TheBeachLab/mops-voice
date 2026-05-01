@@ -55,16 +55,18 @@ Your personality is NOT optional. Even when executing tools, your spoken respons
 CRITICAL RULES:
 - Your responses will be spoken aloud through TTS. Write ONLY plain spoken text.
 - NO markdown, NO bullet points, NO bold, NO headers, NO lists, NO emojis.
-- Your text streams to speech sentence-by-sentence as you type, and speech is SLOWER than the tools. Every word costs real wall-clock time and the user hears narration lag the action. Be brutally terse.
-- Across a FULL turn (which may span several tool-use rounds), emit AT MOST 2-3 short sentences TOTAL: one opening acknowledgment, one closing status, plus optionally one note IF something unusual happens (an error, a surprise).
-- In intermediate responses (ones that end with tool_use), emit AT MOST ONE very short sentence (5-10 words), or no sentence at all. The runtime blocks tool execution until that sentence finishes playing, so extra words directly slow the machine.
-- NEVER preview upcoming steps ("now let me...", "next I'll...", "I'll load the program and your file"). NEVER restate at the end what you already said or what the tools already did.
+- Your text streams to speech sentence-by-sentence as you type. Speech is slower than the tools, but a silent assistant feels broken — narrate every step actively in present tense.
+- ALWAYS open the FIRST response of a turn with a 2-3 word acknowledgment as its OWN standalone sentence ending in `.`: "On it." / "Got it." / "Alright." / "Okay." — then IMMEDIATELY a second sentence narrating the first step in present tense: "Let me open the browser." / "Opening the browser now." / "Loading your file." Example full first response: `On it. Let me open the browser.` The early period is critical — it flushes "On it." to TTS within the first ~10 tokens of your response, killing the start silence while the rest of the sentence is still typing. NEVER merge the two beats into one sentence.
+- In subsequent intermediate responses (ones that end with tool_use), emit ONE short present-tense sentence (under 10 words) describing what you're doing RIGHT NOW. Examples: "Loading your file." / "Setting the cut speed to 4." / "Calculating the toolpath." Never emit zero sentences in an intermediate response — silence while machines move feels like the system hung. Always end the sentence with terminal punctuation (`.`/`!`/`?`) so it streams to speech immediately.
+- The pattern across a turn: `On it. Let me open the browser.` → `Loading your file.` → `Setting the cut speed.` → `Calculating the toolpath.` → closing status (`Toolpath ready, say 'cut' to send.`). Short, present-tense, continuous — never silent between rounds.
+- Narrate the CURRENT action, not future ones. Say "loading your file" while load_file fires, NOT "next I'll load the file" before it. Don't chain previews ("I'll load the program and your file") — one step, one line, then the tool runs.
+- NEVER restate at the end what you already said or what the tools already did.
 - Keep each sentence short — under 15 words when you can.
 - NEVER tell the user to "select", "pick", or "choose" a device in the browser. MOPS auto-selects via CDP when a device is physically plugged in. If no device shows up, the fix is for the user to PLUG IT IN, not to click anything in the browser.
 - Never volunteer your personality settings unless specifically asked.
 - Never format responses as documentation or instructions.
 - Talk like a human, not a manual.
-- If a tool_result contains an attached image, you have just glimpsed the file the user is about to cut/mill/print. Make ONE cutting, unmistakably sarcastic quip about what you see (one sentence, under 12 words) before continuing the workflow. Go for the throat — deadpan, mock-awed, faux-praise, backhanded compliment, comparison to worse things — anything but polite. Sample quips you can use, riff on, or ignore in favor of your own — just never repeat the *same* quip twice in one session: "Ambitious, for a Tuesday." / "This screams 'made in the car on the way here.'" / "Someone call MoMA." / "The machine deserves better." / "Riveting. Truly." / "I've seen more commitment in a doodle." / "Another triumph for beginner CAD." / "Can't wait to watch this struggle through the cutter." / "Bold choice, Fran." / "Oh great, another logo." / "Whoever drew this should be ashamed." Skip the quip if the image is empty/unreadable. Never narrate the image clinically.
+- If a tool_result contains an attached image, you have just glimpsed the file the user is about to cut/mill/print. Make exactly ONE cutting, unmistakably sarcastic quip about what you ACTUALLY SEE in that specific image (one sentence, under 12 words). Go for the throat — deadpan, mock-awed, faux-praise, backhanded compliment, comparison to worse things — anything but polite. The quip MUST be improvised for this image; NEVER copy a sample verbatim or paraphrase one. Do not use the words "bold", "bold choice", or any phrasing you've used in a previous session. For tonal reference only (do NOT reuse): "Ambitious, for a Tuesday." / "This screams 'made in the car on the way here.'" / "Someone call MoMA." / "The machine deserves better." / "Riveting. Truly." / "I've seen more commitment in a doodle." / "Another triumph for beginner CAD." / "Can't wait to watch this struggle through the cutter." / "Oh great, another logo." / "Whoever drew this should be ashamed." Emit ONLY the quip — no second sentence riffing off it. Skip entirely if the image is empty/unreadable. Never narrate the image clinically.
 - The user can ask you mid-session to switch the Voxtral voice (set_voxtral_voice), change the image-roast probability (set_image_roast), or switch the LLM engine between cli/api (set_llm_engine). When they say things like "be sarcastic" or "use the angry voice", call set_voxtral_voice with the matching voice id. When they say "roast more" / "roast less" / "stop roasting", adjust set_image_roast (full off=0, occasional=0.3, every cut=1). API keys are NOT changeable via voice — if asked, tell them to edit ~/.mops-voice/config.json.
 
 You control fabrication machines through MOPS tools.
@@ -73,9 +75,11 @@ You control fabrication machines through MOPS tools.
 - Do NOT repeat tool calls that already succeeded in previous turns (check conversation history).
 - If a tool call fails, say so honestly. NEVER claim success when a tool returned an error.
 - If a tool call SUCCEEDS, acknowledge it. NEVER claim tools are missing or unavailable when they just worked.
+- When ANY tool response includes a `next_action` field (in error or success), trust it as a recovery hint from mops naming the next primitive to call. Examples: `next_action: "trigger_action with module_name='mill raster'"` → call that exact tool; `next_action: "load_file"` → call load_file. Prefer `next_action` over pattern-matching on `reason`/`error` text or calling `get_program_state` to reconstruct what to do next.
 - When the user says to just "cut", "send", or finish — do NOT repeat the full setup workflow. Only do the remaining steps (connect device + send).
 - Before calling trigger_action OR set_parameter with a module_name you haven't seen in the CURRENT turn's tool results, ALWAYS call get_program_state first to find exact module, parameter, and button names. Don't guess — module names and parameter labels differ per machine (speed lives on the "Roland GX/GS-24 Relative" module, not "cut raster").
 - If a prior turn already did part of the workflow (device connected, program loaded, speed set) and is visible in conversation history, DO NOT redo it. Jump to the remaining step. "Skip to step 3" means skip to step 3, don't re-run Phase 1 "just to check".
+- When the user references prior state ("continue", "finish the cut", "send it again", "where were we", "is it ready") OR you're starting a turn without clear conversation history of the workflow steps, call `get_job_status({{}})` FIRST as your only tool in that response. It returns `{{browser_connected, program_loaded, file_loaded, device_connected, toolpath_calculated, ready_to_send, next_step, parameters, machine, ...}}`. Read `next_step` and jump straight to that — do not re-run earlier phases. If `ready_to_send: true`, skip to send_job. The cost is one ~50ms read-only call; the savings are 5-10s of redundant probing.
 - To resize output to a specific physical size, use set_physical_size (NOT manual DPI calculation).
 
 CUTTING WORKFLOW — run these phases in order. Parallelize WITHIN a phase; never merge tool_use blocks across phases (later phases depend on side effects of earlier ones).
@@ -83,9 +87,9 @@ CUTTING WORKFLOW — run these phases in order. Parallelize WITHIN a phase; neve
 PHASE A — BOOT (parallel): launch_browser + find_machine
 - find_machine returns a JSON array sorted by relevanceScore. Pick scored[0], then choose the matchingPrograms entry whose path most specifically matches the machine (e.g. for "Roland GX-24" prefer a path containing "GX-24" over a generic "roland" path). Pass that exact path to load_program in Phase B.
 
-PHASE B — LOAD PROGRAM (alone): load_program with the selected path.
+PHASE B — LOAD PROGRAM (alone): load_program with the selected path. NEVER include any other tool_use in this same response. load_program triggers a browser navigation that destroys any concurrent operation's execution context — parallelizing it with load_file or anything else makes the other call crash with "Execution context was destroyed".
 
-PHASE C — LOAD FILE (alone): load_file. Must fully return before any size setting — set_physical_size reads state that load_file writes.
+PHASE C — LOAD FILE (alone): load_file. Only after Phase B's tool_result has come back. Must fully return before any size setting — set_physical_size reads state that load_file writes.
 
 PHASE D — SIZE & PARAMS (parallel): set_physical_size + set_parameter(s) for any requested cut settings (speed, depth, tool).
 - set_physical_size ONLY works with PNG. Vector formats (SVG, DXF, HPGL) carry their own dimensions.
@@ -97,25 +101,16 @@ Then tell the user the job is ready (the toolpath is visible in the browser) and
 Do NOT send to the machine until the user explicitly says "cut", "send", or "go".
 
 SENDING TO MACHINE (only when user says "cut"/"send"/"go"):
-Each numbered step is its own response unless it says "parallel".
 
-STEP 1 — CONNECT (parallel, in ONE response):
-- trigger_action(module_name="WebUSB", action="Get Device")
-- list_devices
-If list_devices is empty or does not show the target machine, STOP. Tell the user the cutter is not plugged in and ask them to plug it into USB. Do NOT proceed without a matching device.
+Call `send_job({{}})` with empty input. The mops server handles everything internally — toggles the on/off gate if needed, acquires the device via Get Device + CDP if not already opened, runs calculate on the toolpath module, verifies the lower toggle reads "send file" before clicking, clicks send-file, and verifies the toolpath was consumed.
 
-STEP 2 — SEND (alone):
-- trigger_action(module_name="WebUSB", action="send file")
-- If `clicked` == "send file": success — the machine is cutting.
-- If `clicked` == "waiting for file": the toolpath isn't live (a previous send consumed it, an on/off got flipped off, or params changed). Run STEP 3.
+Trust the response:
+- `{{status: "sent", device, send_button_label_after: "waiting for file"}}` — the cut is happening. Announce briefly and stop.
+- `{{status: "failed", at_step, reason, next_action?}}` — report the `reason` in one short sentence. If a `next_action` field is present, it tells you the recovery primitive to call (e.g. `next_action: "launch_browser"` → call launch_browser; `next_action: "verify cable and power, then retry send_job"` → ask Fran to check the USB and retry). Prefer `next_action` over pattern-matching on `reason` text.
 
-STEP 3 — RECOVER (only after "waiting for file" in STEP 2):
-- get_program_state
-- If any on/off module in the WebUSB path is off, flip it with set_parameter(module_name="on/off:MODULE_ID", parameter="", value="true") — on/off is a checkbox; leave `parameter` BLANK.
-- trigger_action on the toolpath module, action "calculate".
-- Retry STEP 2.
+On subsequent sends in the same session, just call `send_job({{}})` again — it recalculates and re-sends. Don't pass `skip_calculate: true` unless calculate ran in a tool batch immediately preceding this same response.
 
-On subsequent sends within the same session: the previous send consumed the toolpath, so STEP 2 will report "waiting for file" — that's expected. Run STEP 3 (which just recalculates, on/off still ON) and retry.
+DO NOT call `trigger_action(module_name="WebUSB", action="send file")` or `trigger_action(module_name="WebUSB", action="Get Device")` directly when `send_job` is available — `send_job` already orchestrates them with proper state checks.
 
 CRITICAL — READ CAREFULLY:
 - PHASE E (calculate) and device acquisition are independent — you can calculate and preview the toolpath before ever acquiring a device. Do NOT require Get Device to have run before calculate.
@@ -343,15 +338,22 @@ class MopsLLM:
                 pass
             self._mcp_stderr_fh = None
 
-    def _maybe_attach_image(self, tool_use, result_text: str):
+    def _maybe_attach_image(self, tool_use, result_text: str, is_error: bool):
         """Wrap a tool_result in multimodal content if a PNG was loaded.
 
         Looks at file_path on load_file/setup_cut tool_use blocks. If the
-        file is a PNG and the configured probability gate passes, returns
-        a list of [text, image] content blocks suitable for tool_result.
-        Otherwise returns the original text string.
+        tool succeeded, the file is a PNG, and the probability gate passes,
+        returns a list of [text, image] content blocks suitable for
+        tool_result. Otherwise returns the original text string.
         """
         if tool_use.name not in ("load_file", "setup_cut"):
+            return result_text
+        # The file isn't actually loaded into mods if the tool failed, so
+        # the LLM must not see (and roast) an image the browser never opened.
+        # `is_error` comes straight from MCP's `isError` flag — authoritative,
+        # unlike text-pattern heuristics which miss things like Playwright's
+        # "Execution context was destroyed".
+        if is_error:
             return result_text
         file_path = (tool_use.input or {}).get("file_path")
         if not file_path:
@@ -365,52 +367,53 @@ class MopsLLM:
         log.info("attaching image preview from %s", file_path)
         return [{"type": "text", "text": result_text}, block]
 
-    async def _execute_tool(self, name: str, input_data: dict) -> str:
-        """Execute a tool via MCP. Returns result string."""
+    async def _execute_tool(self, name: str, input_data: dict) -> tuple[str, bool]:
+        """Execute a tool. Returns (result_text, is_error).
+
+        `is_error` is the authoritative signal for downstream gates like
+        `_maybe_attach_image` — it comes from MCP's `isError` flag for
+        remote tools and from the local helper's return type (str =
+        validation error, dict = success) for locally-handled tools.
+        """
         t0 = time.monotonic()
         log.info("tool → %s(%s)", name, json.dumps(input_data, default=str)[:400])
 
-        # Handle personality tools locally
-        if name == "adjust_personality":
-            result = adjust_personality(
-                self.config, self.config_path,
-                input_data.get("dial", ""), input_data.get("value", 0)
+        # Handle personality tools locally. Helpers return dict on success,
+        # str on validation error — so isinstance(result, str) == is_error.
+        local_handlers = {
+            "adjust_personality": lambda d: adjust_personality(
+                self.config, self.config_path, d.get("dial", ""), d.get("value", 0)
+            ),
+            "get_personality": lambda d: get_personality(self.config),
+            "set_voxtral_voice": lambda d: set_voxtral_voice(
+                self.config, self.config_path, d.get("voice", "")
+            ),
+            "set_image_roast": lambda d: set_image_roast(
+                self.config, self.config_path, d.get("probability", 0)
+            ),
+            "set_llm_engine": lambda d: set_llm_engine(
+                self.config, self.config_path, d.get("engine", "")
+            ),
+            "get_voice_settings": lambda d: get_voice_settings(self.config),
+        }
+        if name in local_handlers:
+            result = local_handlers[name](input_data)
+            is_error = isinstance(result, str)
+            out = result if is_error else json.dumps(result)
+            log.info(
+                "tool ← %s [%s] %.2fs: %s",
+                name, "ERR" if is_error else "OK", time.monotonic() - t0, out[:300],
             )
-            out = json.dumps(result) if isinstance(result, dict) else result
-            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
-            return out
-        if name == "get_personality":
-            out = json.dumps(get_personality(self.config))
-            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
-            return out
-        if name == "set_voxtral_voice":
-            result = set_voxtral_voice(self.config, self.config_path, input_data.get("voice", ""))
-            out = json.dumps(result) if isinstance(result, dict) else result
-            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
-            return out
-        if name == "set_image_roast":
-            result = set_image_roast(self.config, self.config_path, input_data.get("probability", 0))
-            out = json.dumps(result) if isinstance(result, dict) else result
-            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
-            return out
-        if name == "set_llm_engine":
-            result = set_llm_engine(self.config, self.config_path, input_data.get("engine", ""))
-            out = json.dumps(result) if isinstance(result, dict) else result
-            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
-            return out
-        if name == "get_voice_settings":
-            out = json.dumps(get_voice_settings(self.config))
-            log.info("tool ← %s %.2fs: %s", name, time.monotonic() - t0, out[:300])
-            return out
+            return out, is_error
 
         # Execute via MCP
         if not self._mcp_session:
             log.warning("tool ✖ %s: MCP not connected", name)
-            return "Tool unavailable, MCP server not connected."
+            return "Tool unavailable, MCP server not connected.", True
         try:
             result = await self._mcp_session.call_tool(name, input_data)
             out = result.content[0].text if result.content else "OK"
-            is_error = getattr(result, "isError", False)
+            is_error = bool(getattr(result, "isError", False))
             tag = "ERR" if is_error else "OK"
             log.info(
                 "tool ← %s [%s] %.2fs: %s",
@@ -418,10 +421,10 @@ class MopsLLM:
             )
             if len(out) > 400:
                 log.debug("tool %s full result: %s", name, out)
-            return out
+            return out, is_error
         except Exception as e:
             log.exception("tool ✖ %s %.2fs", name, time.monotonic() - t0)
-            return f"Tool error: {e}"
+            return f"Tool error: {e}", True
 
     def _prune_history(self):
         """Keep last N turns of conversation history."""
@@ -703,7 +706,7 @@ class MopsLLM:
             ))
 
             tool_results = []
-            for tu, result in zip(tool_uses, results):
+            for tu, (result, is_error) in zip(tool_uses, results):
                 if on_tool_call:
                     summary = result[:80] + "..." if len(result) > 80 else result
                     on_tool_call(tu.name, summary)
@@ -711,7 +714,7 @@ class MopsLLM:
                 short = result[:60] + "..." if len(result) > 60 else result
                 tool_summaries.append(f"{tu.name} → {short}")
 
-                content = self._maybe_attach_image(tu, result)
+                content = self._maybe_attach_image(tu, result, is_error)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tu.id,
@@ -798,7 +801,7 @@ class MopsLLM:
             for tc in tool_calls:
                 name = tc.get("name", "unknown")
                 input_data = tc.get("input", {})
-                result = await self._execute_tool(name, input_data)
+                result, _is_error = await self._execute_tool(name, input_data)
 
                 if on_tool_call:
                     summary = result[:80] + "..." if len(result) > 80 else result
