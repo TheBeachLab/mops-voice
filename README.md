@@ -116,5 +116,6 @@ API keys are deliberately NOT voice-changeable — edit `~/.mops-voice/config.js
 
 - macOS on Apple Silicon (M1/M2/M3) for the full local stack, or any Linux/Intel host with the Voxtral TTS engine (`tts_engine: voxtral` + Mistral API key). F5-TTS is Apple Silicon only.
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (for CLI engine) or Anthropic API key (for API engine)
-- Node.js 18+ — the MOPS MCP server is fetched on demand via `npx -y @thebeachlab/mops`. First run also needs `npx @thebeachlab/mops setup` once to install the Playwright Chromium browser.
+- Node.js 18+ with `npx` on `PATH` — `npx` is not bundled with macOS or this repo; install Node from [nodejs.org](https://nodejs.org/) (or `brew install node`) and verify with `npx --version` before first run. The MOPS MCP server is then fetched on demand via `npx -y @thebeachlab/mops`. First run also needs `npx @thebeachlab/mops setup` once to install the Playwright Chromium browser.
+- MOPS itself lives at [github.com/TheBeachLab/mops](https://github.com/TheBeachLab/mops) — see that repo for the tool list, server internals, and issue tracker.
 - To pin to a local mops checkout instead, set `mops_server_command: "node /path/to/mops/src/server.js"` in `~/.mops-voice/config.json`.
